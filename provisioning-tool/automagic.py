@@ -28,10 +28,15 @@
 #            fixed some python3 compatibility issues
 #            re-fetch settings after device name changes in provision()/provision_list()
 #            added identify operation
-#            added --restore option to apply (work-in-progress)
+#            added --restore option to apply
 #            added Gateway to import column options
 #            better query columns expansion e.g. wifi_sta.gw will now match settings.wifi_sta.gw
-#            --restore work-in-progress
+#            added replace operation
+#
+# 1.0003   - filter some settings from the copy operation during a replace, including "fw" which isn't settable
+#            added Lat/Lng to import and provision-list
+#            added --settings to support Lat/Lng with simple provision operation
+#            improved error handling of timeouts during factory-reset
 #
 ######################################################################################################################
 #
@@ -39,6 +44,8 @@
 #            Insure it's a 2.4GHz network
 #            mDNS discovery?
 #
+#            Simplify some python2/3 compatibility per: http://python-future.org/compatible_idioms.html
+#            Lat/Lng/TZ columns in import -- provision accordingly
 #            DeviceType -- limit provision-list to matching records -- provision-list to choose devices by DeviceType
 #            --parallel=<n>  batched parallel firmware updating, n at a time, pausing between batches, or exiting if no more
 #            make apply do status/settings update to device_db
@@ -47,9 +54,6 @@
 #            --group for "provision" -- add to group
 #            --prompt n,n,n  for use with "provision" to prompt for v,v,v giving individual values like StaticIP
 #            apply -U/--update option to change db entries
-#
-#     WIP:  --restore option 
-#       ...  actions: curl 'http://192.168.51.1/settings/actions?index=0&name=out_on_url&enabled=true&urls\[\]=http://192.168.1.10/relay/0?turn=on'
 #
 ######################################################################################################################
 
@@ -74,10 +78,8 @@ import csv
 import timeit
 import importlib
 import collections
-
-##actions?active=False&names=%5Bu%27btn_on_url%27%2C+u%27btn_off_url%27%2C+u%27longpush_url%27%2C+u%27shortpush_url%27%2C+u%27out_on_url%27%2C+u%27out_off_url%27%2C+u%27lp_on_url%27%2C+u%27lp_off_url%27%2C+u%27ext_temp_over_url%27%2C+u%27ext_temp_under_url%27%2C+u%27ext_temp_over_url%27%2C+u%27ext_temp_under_url%27%2C+u%27ext_temp_over_url%27%2C+u%27ext_temp_under_url%27%2C+u%27ext_hum_over_url%27%2C+u%27ext_hum_under_url%27%5D
-
-
+import copy
+import socket
 
 if sys.version_info.major >= 3:
     import urllib.request
@@ -86,15 +88,17 @@ if sys.version_info.major >= 3:
     from io import BytesIO
     import collections.abc
     from urllib.parse import urlencode, quote_plus, quote
+    from urllib.error import URLError, HTTPError
 else:
     from urllib import urlencode
     input = raw_input
     import urllib2
     import urllib
     from StringIO import StringIO
+    from urllib2 import HTTPError
 
 required_keys = [ 'SSID', 'Password' ]
-optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName' ]
+optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName', 'Lat', 'Lng' ]
 default_query_columns = [ 'type', 'Origin', 'IP', 'ID', 'fw', 'has_update', 'settings.name' ] 
 
 exclude_setting = [ 'unixtime', 'fw', 'time', 'hwinfo', 'build_info', 'device', 'ison', 'has_timer', 'power', 'connected',
@@ -103,7 +107,11 @@ exclude_setting = [ 'unixtime', 'fw', 'time', 'hwinfo', 'build_info', 'device', 
         'schedule','schedule_rules',                                    # handled differently
         'login','wifi_sta','wifi_sta1','wifi_ap' ]                      # not allowing these, for now, because of password not being present
 
-version = "1.0002"
+exclude_from_copy = [ 'actions.names','alt_modes','build_info','calibrated','device.mac','device.hostname','device.num_emeters','device.num_inputs',
+                      'device.num_meters','device.num_outputs','device.num_rollers','device.type','fw','hwinfo.batch_id','hwinfo.hw_revision',
+                      'unixtime','settings.meters','settings.fw_mode','settings.login.default_username' ]
+
+version = "1.0003"
 init = None
 connect = None
 reconnect = None
@@ -337,11 +345,16 @@ def print_docs( ):
                      Gateway                     A Gateway shoule be included when a StaticIP is set.  It is needed for the device
                                                  to reach any services like sntp, to get the time, or to download OTA updates.
 
+                     Lat                         Latitude, for Lng, for sunrise/sunset calculations, must also supply Lng.
+
+                     Lng                         Longitude, for sunrise/sunset calculations, must also supply Lat.
+
                      Group                       A Group can be assigned to an imported record, and later used to select a subset
                                                  of records for operations like provision-list.  See the --group option.
 
                      Tags                        A set of comma-delimited tags can be assigned to an imported record and used in 
-                                                 a similar fashion to the "Group" field.  See the --match-tag option.
+                                                 a similar fashion to the "Group" field.  See the --match-tag option. This field
+                                                 must be quoted if it contains commas.
 
                      Label                       The Label field is useful with the feature for printing a label when each device
                                                  is provisioned.  It is a free-form text field.  See --print-using option, and
@@ -454,7 +467,7 @@ def print_docs( ):
 
                      --ota-timeout (-n)          Time in seconds to wait on OTA udpate. Default 300 (5 minutes).
 
-                     --url                       The --url option specifies an URL fragement like "/settings/?lat=31.32&lng=-98.324" to 
+                     --url                       The --url option specifies an URL fragment like "/settings/?lat=31.32&lng=-98.324" to 
                                                  be applied to each matching device.  The --url option can be repeated multiple times.  
                                                  The Device IP will be prefixed to each specified URL fragment to produce a complete URL 
                                                  like "http://192.168.1.10//settings/?lat=31.32&lng=-98.324"
@@ -501,6 +514,9 @@ def print_docs( ):
                                                  ex: def make_label( dev_info ):
                                                          print( repr( dev_info ) )
 
+                     --settings N=V,N=V...       Supply Lat/Lng or other values to apply during provisioning step.  Supported attributes:
+                                                 DeviceName, Lat, Lng
+                                                 
 
                  factory-reset
                  -------------
@@ -933,13 +949,14 @@ def mac_get_cred():
     return {'profile' : ssid, 'ssid' : ssid, 'password' : pw.decode("ascii") }
 
 def mac_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
-    for i in range(3):
+    for i in range( 3 ):
         if prefix:
             networks, error = os_stash['iface'].scanForNetworksWithSSID_error_(None, None)
         else:
             networks, error = os_stash['iface'].scanForNetworksWithName_error_(str, None)
         if networks:
             break
+        time.sleep( 1 )
 
     if verbose > 1: print(repr(networks))
 
@@ -971,12 +988,19 @@ def mac_reconnect( credentials ):
 def get_url( addr, tm, verbose, url, operation ):
     for i in range( 5 ):
         contents=""
+        raw_data=""
         if verbose and operation != '':
             print( 'Attempting to connect to device at ' + addr + ' ' + operation )
+            if verbose > 1:
+                print( url )
         try:
-            contents = json.loads( url_read( url ) )
-        except:
-            pass
+            raw_data = url_read( url )
+            contents = json.loads( raw_data )
+        except HTTPError as e:
+            print('Error code:', e.code)
+            print( e.read( ) )
+        except BaseException as e:
+            if verbose or i > 3: print( e )
        
         if contents:
             if verbose > 1:
@@ -985,7 +1009,8 @@ def get_url( addr, tm, verbose, url, operation ):
         time.sleep( tm )
 
     print( "Failed five times to contact device at " + addr + ". Try increasing --time-to-pause option, or move device closer" )
-    return False
+    if raw_data: print( "Raw results from last attempt: " + raw_data )
+    return None
 
 def set_settings_url( address, ssid, pw, static_ip, ip_mask, gateway ):
     if static_ip:
@@ -997,16 +1022,19 @@ def set_settings_url( address, ssid, pw, static_ip, ip_mask, gateway ):
 def status_url( address ):
     return "http://" + address + "/status"
 
-def get_settings_url( address ):
-    return "http://" + address + "/settings"
+def get_settings_url( address, rec = None ):
+    map = { "DeviceName" : "name", "Lat" : "lat", "Lng" : "lng" }
+    parms = {}
+    if rec:
+         for tag in map:
+             if tag in rec: parms[ map[ tag ] ] = rec[ tag ]
+    q = "?" + url_encode( parms ) if parms else ""
+    return "http://" + address + "/settings" + q
 
 def ota_url( addr, fw ):
     if fw == 'LATEST':
         return "http://" + addr + "/ota?update=1"
     return "http://" + addr + "/ota?url=" + fw
-
-def get_name_setting_url( addr, name ):
-    return "http://" + addr + "/settings?" + url_encode( { 'name' : name } )
 
 def get_status( addr, tm, verbose ):
     url = status_url( addr )
@@ -1290,17 +1318,17 @@ def print_details( col, paths, verbosity, max_width ):
     else:
         print( col )
 
-def get_query_conditions( query_conditions ):
+def get_name_value_pairs( query_conditions, term_type = '--query-condition' ):
     result = [ x.split('=') for x in query_conditions.split(',') ] if query_conditions else []
     for q in result:
         if len(q) < 2:
-            print( "Each --query-condition term must contain name=value" )
+            print( "Each " + term_type + " term must contain name=value" )
             sys.exit()
     return result
 
 def schema( args ):
     query_columns = args.query_columns.split(',') if args.query_columns else []
-    query_conditions = get_query_conditions( args.query_conditions )
+    query_conditions = get_name_value_pairs( args.query_conditions )
     u = {}
     guide = {}
 
@@ -1345,8 +1373,13 @@ def query( args, new_version = None ):
 
     if args.refresh: probe_list( args )
 
-    query_columns = args.query_columns.split(',') if args.query_columns else default_query_columns
-    query_conditions = get_query_conditions( args.query_conditions )
+    if args.query_columns and args.query_columns.startswith('+'):
+        query_columns = default_query_columns
+        query_columns.extend( re.sub('^\+','',args.query_columns).split(',') )
+    else:
+        query_columns = args.query_columns.split(',') if args.query_columns else default_query_columns
+
+    query_conditions = get_name_value_pairs( args.query_conditions )
 
     guide = {}
     tmp = []
@@ -1505,9 +1538,9 @@ def probe_list( args ):
         ip_address = rec[ 'ProbeIP' ]
 
         if not args.refresh: eprint( ip_address )
-        initial_status = get_url( ip_address, 1, args.verbose, status_url( ip_address ), 'to get current status' )
+        initial_status = get_url( ip_address, args.pause_time, args.verbose, status_url( ip_address ), 'to get current status' )
         if initial_status:
-            configured_settings = get_url( ip_address, 1, args.verbose, get_settings_url( ip_address ), 'to get config' )
+            configured_settings = get_url( ip_address, args.pause_time, args.verbose, get_settings_url( ip_address ), 'to get config' )
             actions = get_actions( ip_address, 1, args.verbose )
             if actions and 'actions' in actions:
                 rec['actions'] = actions[ 'actions' ]
@@ -1667,11 +1700,16 @@ def append_list( l ):
                 r[ k ] = row[ k ]
         for k in optional_keys:
             if k in row:
-                if k == 'StaticIP' and row[ k ] != '':
+                if k == 'StaticIP' and row[ k ]:
                     r[ 'IP' ] = row[ 'StaticIP' ]
                     if 'NetMask' not in row or not row[ 'NetMask' ]:
                         print( "Record " + str( n ) + " contains StaticIP but not NetMask. Correct the import file to supply both." )
                         sys.exit( )
+                if k in ( 'Lat', 'Lng' ) and row [ k ]:
+                    if 'Lat' not in row or 'Lng' not in row or not row[ 'Lat' ] or not row[ 'Lng' ]:
+                        print( "Record " + str( n ) + " contains " + k + ' but not ' + ( 'Lng' if k == 'Lat' else 'Lat' ) )
+                        sys.exit( )
+
                 r[ k ] = row[ k ]
         r[ 'InsertTime' ] = time.time()
         device_queue.append( r )
@@ -1724,32 +1762,30 @@ def import_csv( file, queue_file ):
 def finish_up_device( device, rec, operation, args, new_version, initial_status, configured_settings = None ):
     global device_db
     rec[ 'ConfirmedTime' ] = time.time()
-    need_update = False
+    #need_update = False
 
-    if not configured_settings: configured_settings = get_url( device, 1, args.verbose, get_settings_url( device ), 'to get config' )
+    if not configured_settings: configured_settings = get_url( device, args.pause_time, args.verbose, get_settings_url( device, rec ), 'to get config' )
     rec['status'] = initial_status
-    rec['settings'] = configured_settings
+    rec['settings'] = configured_settings if configured_settings else {}
     rec['Origin'] = operation
     rec['ID'] = initial_status['mac']
     rec['IP'] = initial_status[ 'wifi_sta' ][ 'ip' ]
     device_db[ initial_status['mac'] ] = rec
     write_json_file( args.device_db, device_db )
 
-    if 'DeviceName' in rec:
-        new_settings = get_url( device, 1, args.verbose, get_name_setting_url( device, rec[ 'DeviceName' ] ), 'to set device name' )
-        need_update = True
-        ### new_settings = get_url( device, 1, args.verbose, get_settings_url( device ), 'to get config' )
-        rec['settings'] = new_settings
+    #if 'DeviceName' in rec:
+    #    new_settings = get_url( device, args.pause_time, args.verbose, get_settings_url( device, rec ), 'to set device name' )
+    #    need_update = True
+    #    rec['settings'] = new_settings
 
     if args.ota != '':
         if program_device( device, args.pause_time, args.verbose, args.ota, args.ota_timeout, new_version ):
-            need_update = True
+    #        need_update = True
             new_status = get_status( device, args.pause_time, args.verbose )
-            rec['status'] = new_status
-
-    if need_update:
-        device_db[ initial_status['mac'] ] = rec
-        write_json_file( args.device_db, device_db )
+            rec['status'] = new_status if new_status else {}
+    #if need_update:
+            device_db[ initial_status['mac'] ] = rec
+            write_json_file( args.device_db, device_db )
 
     if args.print_using: 
         print_label( rec )
@@ -1767,6 +1803,8 @@ def provision( credentials, args, new_version ):
     ssid = credentials['ssid']
     pw = credentials['password']
     setup_count = 0
+
+    settings = get_name_value_pairs( args.settings, term_type = '--settings' )
 
     if args.ssid and args.ssid != ssid:
         print('Connect to ' + args.ssid + ' first')
@@ -1827,7 +1865,9 @@ def provision( credentials, args, new_version ):
             initial_status = get_status( found, args.pause_time, args.verbose )
             if initial_status:
                 print( "Confirmed device " + found + " on " + ssid + ' network' )
-                ### rec['IP'] = initial_status[ 'wifi_sta' ][ 'ip' ]
+                for pair in settings:
+                    if pair[0] in ('DeviceName','Lat','Lng'):
+                        rec[ pair[0] ] = pair[1]
                 finish_up_device( found, rec, 'provision', args, new_version, initial_status )
             else:
                 print( "Could not find device on " + ssid + ' network' )
@@ -1845,11 +1885,28 @@ def identify( device_address ):
 
 def replace_device( db_path, from_device, to_device ):
     global device_db
+
     for d in [ ('from', from_device ), ('to', to_device ) ]:
         if d[1] not in device_db:
             print( "--" + d[0] + " device " + d[1] + " is not stored in the device db " + db_path )
             sys.exit()
-    device_db[ to_device ][ 'settings' ] = device_db[ from_device ][ 'settings' ]
+
+    saved = copy.deepcopy( device_db[ to_device ][ 'settings' ] )
+
+    device_db[ to_device ][ 'settings' ] = copy.deepcopy( device_db[ from_device ][ 'settings' ] )
+    for n in exclude_from_copy:
+        src = saved
+        dest = device_db[ to_device ][ 'settings' ]
+        for k in n.split('.'):
+            if k in src:
+                src = src[ k ]
+                if type( src ) == type( {} ):
+                     if not k in dest:
+                         dest[ k ] = {}
+                     dest = dest[ k ]
+                else:
+                     dest[ k ] = src
+
     device_db[ to_device ][ 'actions' ] = device_db[ from_device ][ 'actions' ]
     write_json_file( db_path, device_db )
     
@@ -1860,8 +1917,11 @@ def factory_reset( device_address, verbose ):
         if verbose > 1:
             print( repr( contents ) )
         print( "Reset sent to " + device_address )
-    except:
+    except BaseException as e:
         print( "Reset failed" )
+        if isinstance( e.reason, socket.timeout ) or str( e.reason ) == '[Errno 64] Host is down':
+            print( "Device is not reachable on your network" )
+            return
         print( "Unexpected error:", sys.exc_info( )[0] )
 
 def validate_options( vars ):
@@ -1876,7 +1936,7 @@ def validate_options( vars ):
               "probe-list" : [ "query_conditions", "group" ],
               "probe-refresh" : [ "query_conditions", "group" ],
               "provision-list" : [ "group", "ddwrt_name", "group", "cue", "timing", "ota", "print_using", "toggle", "wait_time" ],
-              "provision" : [ "ssid", "wait_time", "ota", "print_using", "toggle", "cue" ],
+              "provision" : [ "ssid", "wait_time", "ota", "print_using", "toggle", "cue", "settings" ],
               "list" : [ "group" ],
               "clear-list" : [ ]
             }
@@ -1892,7 +1952,7 @@ def validate_options( vars ):
 
     for r in require:
          if r in allow:
-             allow[ r ].update( require[ r ] )
+             allow[ r ].extend( require[ r ] )
          else:
              allow[ r ] = require[ r ]
 
@@ -1947,7 +2007,7 @@ def main():
     p.add_argument(       '--url', dest='apply_urls', action='append', help='URL fragments to apply, i.e "/settings/?lat=31.366398&lng=-96.721352"' )
     p.add_argument(       '--cue', action='store_true', help='Ask before continuing to provision next device' )
     p.add_argument(       '--timing', action='store_true', help='Show timing of steps during provisioning' )
-    p.add_argument( '-q', '--query-columns', help='Comma separated list of columns to output' )
+    p.add_argument( '-q', '--query-columns', help='Comma separated list of columns to output, start with "+" to also include default columns' )
     p.add_argument( '-Q', '--query-conditions', help='Comma separated list of name=value selectors' )
     p.add_argument( '-t', '--match-tag', help='Tag to limit query and apply operations' )
     p.add_argument( '-T', '--set-tag', help='Tag results of query operation' )
@@ -1957,6 +2017,7 @@ def main():
     p.add_argument(       '--from-device', metavar='DEVICE-ID', help='Device db entry from which to copy settings using the replace operation' )
     p.add_argument(       '--to-device', metavar='DEVICE-ID', help='Device db entry to receive the copy of settings using the replace operation' )
     p.add_argument(       '--dry-run', action='store_true', help='Display urls to apply instead of performing --restore' )
+    p.add_argument(       '--settings', help='Comma separated list of name=value settings for use with provision operation' )
     p.add_argument( metavar='OPERATION',
                     help='help|features|provision|provision-list|factory-reset|program|import|' + \
                          'ddwrt-learn|list|clear-list|print-sample|probe-list|probe-refresh|query|apply|schema|identify|replace',
@@ -2120,13 +2181,16 @@ def main():
 
     elif args.operation == 'replace':
         replace_device( args.device_db, args.from_device, args.to_device )
-try:
-    compatibility()
-    main() 
-except EOFError as error:
-    pass
-except KeyboardInterrupt as error:
-    pass
+
+
+if __name__ == '__main__':
+    try:
+        compatibility()
+        main() 
+    except EOFError as error:
+        pass
+    except KeyboardInterrupt as error:
+        pass
 
 
 ### examples of GUI interaction with DD-WRT device
