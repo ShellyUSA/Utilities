@@ -45,12 +45,10 @@
 #            mDNS discovery?
 #
 #            Simplify some python2/3 compatibility per: http://python-future.org/compatible_idioms.html
-#            Lat/Lng/TZ columns in import -- provision accordingly
 #            DeviceType -- limit provision-list to matching records -- provision-list to choose devices by DeviceType
 #            --parallel=<n>  batched parallel firmware updating, n at a time, pausing between batches, or exiting if no more
 #            make apply do status/settings update to device_db
-#            add setting lat/long, tz
-#            --settings n=v,n=v... for use with "provision" to provide certain values otherwise found in queue (lat/long)
+#            TZ setting
 #            --group for "provision" -- add to group
 #            --prompt n,n,n  for use with "provision" to prompt for v,v,v giving individual values like StaticIP
 #            apply -U/--update option to change db entries
