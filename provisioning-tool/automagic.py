@@ -18,7 +18,7 @@
 #
 #  tl;dr: Run the program with "features" or "help" to learn more
 #
-#  python automagic.py features
+#  ex: python automagic.py features
 #
 ######################################################################################################################
 #
@@ -41,17 +41,24 @@
 ######################################################################################################################
 #
 #  TODO:
+#            make apply do status/settings update to device_db
+#
+#  NICE-TO-HAVES:
 #            Insure it's a 2.4GHz network
 #            mDNS discovery?
 #
+#            make provision-list work without dd-wrt... rename provision_list and provision to provision_ddwrt and provision_native(?)
 #            Simplify some python2/3 compatibility per: http://python-future.org/compatible_idioms.html
 #            DeviceType -- limit provision-list to matching records -- provision-list to choose devices by DeviceType
 #            --parallel=<n>  batched parallel firmware updating, n at a time, pausing between batches, or exiting if no more
-#            make apply do status/settings update to device_db
-#            TZ setting
 #            --group for "provision" -- add to group
 #            --prompt n,n,n  for use with "provision" to prompt for v,v,v giving individual values like StaticIP
 #            apply -U/--update option to change db entries
+#            apply --settings(?)
+#            poll command: like query/apply, for discovering/configuring battery powered/sparse-access devices
+#            Access=Constant/Sparse -- to indicate which devices shouldn't be expected online
+#            apply-list(?)
+#            make --settings work with provision-list and provision-settings, as defaults(?)
 #
 ######################################################################################################################
 
@@ -96,7 +103,7 @@ else:
     from urllib2 import HTTPError
 
 required_keys = [ 'SSID', 'Password' ]
-optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName', 'Lat', 'Lng' ]
+optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName', 'LatLng', 'TZ' ]
 default_query_columns = [ 'type', 'Origin', 'IP', 'ID', 'fw', 'has_update', 'settings.name' ] 
 
 exclude_setting = [ 'unixtime', 'fw', 'time', 'hwinfo', 'build_info', 'device', 'ison', 'has_timer', 'power', 'connected',
@@ -343,9 +350,11 @@ def print_docs( ):
                      Gateway                     A Gateway shoule be included when a StaticIP is set.  It is needed for the device
                                                  to reach any services like sntp, to get the time, or to download OTA updates.
 
-                     Lat                         Latitude, for Lng, for sunrise/sunset calculations, must also supply Lng.
+                     LatLng                      Latitude and longitude, for sunrise/sunset calculations, in the form lat:lng,
+                                                    ex: 30.33658:-97.77775
 
-                     Lng                         Longitude, for sunrise/sunset calculations, must also supply Lat.
+                     TZ                          Timezone info, in the form tz_dst:tz_dst_auto:tz_utc_offset:tzautodetect, 
+                                                    ex: False:True:-14400:True
 
                      Group                       A Group can be assigned to an imported record, and later used to select a subset
                                                  of records for operations like provision-list.  See the --group option.
@@ -512,8 +521,8 @@ def print_docs( ):
                                                  ex: def make_label( dev_info ):
                                                          print( repr( dev_info ) )
 
-                     --settings N=V,N=V...       Supply Lat/Lng or other values to apply during provisioning step.  Supported attributes:
-                                                 DeviceName, Lat, Lng
+                     --settings N=V,N=V...       Supply LatLng or other values to apply during provisioning step.  Supported attributes:
+                                                 DeviceName, LatLng, TZ
                                                  
 
                  factory-reset
@@ -947,27 +956,33 @@ def mac_get_cred():
     return {'profile' : ssid, 'ssid' : ssid, 'password' : pw.decode("ascii") }
 
 def mac_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
-    for i in range( 3 ):
-        if prefix:
-            networks, error = os_stash['iface'].scanForNetworksWithSSID_error_(None, None)
-        else:
-            networks, error = os_stash['iface'].scanForNetworksWithName_error_(str, None)
-        if networks:
-            break
-        time.sleep( 1 )
-
-    if verbose > 1: print(repr(networks))
-
-    if not networks:
-        print( error )
-        return None
-
-    found = None
+    passes = 0
+    while passes < 5:
+        for i in range( 3 ):
+            passes += 1
+            if prefix:
+                networks, error = os_stash['iface'].scanForNetworksWithSSID_error_(None, None)
+            else:
+                networks, error = os_stash['iface'].scanForNetworksWithName_error_(str, None)
+            if networks:
+                break
+            time.sleep( 1 )
     
-    for n in networks:
-        if n.ssid() and ( n.ssid().startswith(str) and prefix or n.ssid() == str ) and n.ssid() not in ignore_ssids:
-            found = n
-            break
+        if verbose > 1: print(repr(networks))
+    
+        if not networks:
+            print( error )
+            return None
+    
+        found = None
+        
+        for n in networks:
+            if n.ssid() and ( n.ssid().startswith(str) and prefix or n.ssid() == str ) and n.ssid() not in ignore_ssids:
+                found = n
+                break
+
+        if found: break
+
     if not found:
         return None
    
@@ -1021,11 +1036,13 @@ def status_url( address ):
     return "http://" + address + "/status"
 
 def get_settings_url( address, rec = None ):
-    map = { "DeviceName" : "name", "Lat" : "lat", "Lng" : "lng" }
+    map = { "DeviceName" : "name", "LatLng" : "lat:lng", "TZ" : "tz_dst:tz_dst_auto:tz_utc_offset:tzautodetect" }
     parms = {}
     if rec:
          for tag in map:
-             if tag in rec: parms[ map[ tag ] ] = rec[ tag ]
+             if tag in rec:
+                 for elem in zip( map[ tag ].split(':'), rec[ tag ].split(':') ):
+                     parms[ elem[ 0 ]  ] = elem[ 1 ]
     q = "?" + url_encode( parms ) if parms else ""
     return "http://" + address + "/settings" + q
 
@@ -1172,10 +1189,12 @@ def check_for_device_queue( group = None, include_complete = False ):
         print( "List has no entries ready to provision. " + txt )
     sys.exit()
 
-def ddwrt_wget( cn, url, msg, tries = 1 ):
+def ddwrt_wget( cn, url, verbose, msg, tries = 1 ):
     passes = 0
     if msg:
         sys.stdout.write( msg )
+    if verbose > 0:
+        print( url )
     while True:
         passes += 1
         if msg:
@@ -1551,6 +1570,7 @@ def probe_list( args ):
             rec['status'] = initial_status
             if configured_settings:
                 rec['settings'] = configured_settings
+                rec['CompletedTime'] = time.time()
             else:
                 print( "Failed to update settings for " + id )
             rec['Origin'] = 'probe-list'
@@ -1573,6 +1593,8 @@ def provision_list( args, new_version ):
     for rec in device_queue:
         if 'CompletedTime' in rec or args.group and ( not 'Group' in rec or rec[ 'Group' ] != args.group ):
             continue
+        if 'SSID' not in rec:
+            continue
         if setup_count > 0 and args.cue:
             print()
             print()
@@ -1585,10 +1607,10 @@ def provision_list( args, new_version ):
             t1 = timeit.default_timer()
             device_ssids = discover( sta_node, args.prefix )
             if len( device_ssids ) > 0:
-                rec[ 'factory_ssid' ] = device_ssids[0]
                 if args.timing: print( 'discover time: ', round( timeit.default_timer() - t1, 2 ) )
                 print( "" )
                 print( "Ready to program " + device_ssids[0] + " with " + repr( rec ) )
+                rec[ 'factory_ssid' ] = device_ssids[0]
                 rec[ 'InProgressTime' ] = time.time()
                 write_json_file( args.device_queue, device_queue )
 
@@ -1604,7 +1626,7 @@ def provision_list( args, new_version ):
                     if args.timing: print( 'dd-wrt device configuration time: ', round( timeit.default_timer() - t1, 2 ) )
 
                     t1 = timeit.default_timer()
-                    ( response, err ) = ddwrt_wget( sta_node, status_url( factory_device_addr ), None, 10 )
+                    ( response, err ) = ddwrt_wget( sta_node, status_url( factory_device_addr ), args.verbose, None, 10 )
                     if args.timing: print( 'initial status time: ', round( timeit.default_timer() - t1, 2 ) )
                     initial_status = json.loads( response[0] )
 
@@ -1613,7 +1635,7 @@ def provision_list( args, new_version ):
                         url = set_settings_url( factory_device_addr, rec[ 'SSID' ], rec[ 'Password' ], rec[ 'StaticIP'], rec[ 'NetMask' ], rec[ 'Gateway' ] )
                     else:
                         url = set_settings_url( factory_device_addr, rec[ 'SSID' ], rec[ 'Password' ], None, None, None )
-                    ( result, err ) = ddwrt_wget( sta_node, url, None, 5 )
+                    ( result, err ) = ddwrt_wget( sta_node, url, args.verbose, None, 5 )
                     ###LOG### print( result )
                     if args.timing: print( 'settings time: ', round( timeit.default_timer() - t1, 2 ) )
 
@@ -1660,7 +1682,7 @@ def provision_list( args, new_version ):
                 rec[ 'CompletedTime' ] = time.time()
 
                 msg = "Finding " + ip_address + " on new network"
-                ( response, err ) = ddwrt_wget( ap_node, get_settings_url( ip_address ), msg, 40 )
+                ( response, err ) = ddwrt_wget( ap_node, get_settings_url( ip_address, rec ), args.verbose, msg, 40 )
                 configured_settings = json.loads(response[0])
 
                 if args.timing: print( 'WiFi transition time:', round( timeit.default_timer() - t1, 2 ) )
@@ -1672,7 +1694,7 @@ def provision_list( args, new_version ):
                 success_count += 1
                 write_json_file( args.device_queue, device_queue )
 
-                if args.verbose > 1: print( configured_settings[0] )
+                if args.verbose > 1: print( repr( configured_settings ) )
                 print( )
 
                 new_status = get_status( ip_address, args.pause_time, args.verbose )
@@ -1703,9 +1725,13 @@ def append_list( l ):
                     if 'NetMask' not in row or not row[ 'NetMask' ]:
                         print( "Record " + str( n ) + " contains StaticIP but not NetMask. Correct the import file to supply both." )
                         sys.exit( )
-                if k in ( 'Lat', 'Lng' ) and row [ k ]:
-                    if 'Lat' not in row or 'Lng' not in row or not row[ 'Lat' ] or not row[ 'Lng' ]:
-                        print( "Record " + str( n ) + " contains " + k + ' but not ' + ( 'Lng' if k == 'Lat' else 'Lat' ) )
+                if k == 'LatLng' and row[ k ]:
+                    if not re.match('^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+):[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)$',row[ k ]):
+                        print( "Record " + str( n ) + " contains improper LatLng. Must be of the form lat:lng" )
+                        sys.exit( )
+                if k == 'TZ' and row[ k ]:
+                    if not re.match('^(True|False):(True|False):[+-]?([0-9]+):(True|False)$',row[ k ]):
+                        print( "Record " + str( n ) + " contains improper TZ. Must be of the form tz_dst:tz_dst_auto:tz_utc_offset:tzautodetect" )
                         sys.exit( )
 
                 r[ k ] = row[ k ]
@@ -1763,12 +1789,13 @@ def finish_up_device( device, rec, operation, args, new_version, initial_status,
     #need_update = False
 
     if not configured_settings: configured_settings = get_url( device, args.pause_time, args.verbose, get_settings_url( device, rec ), 'to get config' )
-    rec['status'] = initial_status
-    rec['settings'] = configured_settings if configured_settings else {}
-    rec['Origin'] = operation
-    rec['ID'] = initial_status['mac']
-    rec['IP'] = initial_status[ 'wifi_sta' ][ 'ip' ]
-    device_db[ initial_status['mac'] ] = rec
+    rec[ 'status' ] = initial_status
+    rec[ 'settings' ] = configured_settings if configured_settings else {}
+    rec[ 'Origin' ] = operation
+    print( "in finish_up_device: " + repr( initial_status ) )
+    rec[ 'ID' ] = initial_status[ 'mac' ]
+    rec[ 'IP' ] = initial_status[ 'wifi_sta' ][ 'ip' ]
+    device_db[ initial_status[ 'mac' ] ] = rec
     write_json_file( args.device_db, device_db )
 
     #if 'DeviceName' in rec:
@@ -1864,7 +1891,7 @@ def provision( credentials, args, new_version ):
             if initial_status:
                 print( "Confirmed device " + found + " on " + ssid + ' network' )
                 for pair in settings:
-                    if pair[0] in ('DeviceName','Lat','Lng'):
+                    if pair[0] in ( 'DeviceName', 'LatLng', 'TZ' ):
                         rec[ pair[0] ] = pair[1]
                 finish_up_device( found, rec, 'provision', args, new_version, initial_status )
             else:
