@@ -24,6 +24,17 @@
 #
 #  Changes:
 #
+# 1.0005     Added --access ALL|Periodic|Continuous features for probe-list and apply to work with
+#            battery-powered devices with periodic WiFi access
+#
+# 1.0004     apply operation now updates settings in db
+#            apply now takes --settings argument
+#
+# 1.0003   - filter some settings from the copy operation during a replace, including "fw" which isn't settable
+#            added LatLng and TZ to import and provision-list
+#            added --settings to support Lat/Lng with simple provision operation
+#            improved error handling of timeouts during factory-reset
+#
 # 1.0002   - fixed IP address by re-getting status in provision_list()
 #            fixed some python3 compatibility issues
 #            re-fetch settings after device name changes in provision()/provision_list()
@@ -33,32 +44,33 @@
 #            better query columns expansion e.g. wifi_sta.gw will now match settings.wifi_sta.gw
 #            added replace operation
 #
-# 1.0003   - filter some settings from the copy operation during a replace, including "fw" which isn't settable
-#            added Lat/Lng to import and provision-list
-#            added --settings to support Lat/Lng with simple provision operation
-#            improved error handling of timeouts during factory-reset
-#
 ######################################################################################################################
 #
 #  TODO:
-#            make apply do status/settings update to device_db
+#            apply work correctly with --access=Periodic|ALL
+#            Check Shelly firmware version (for LATEST)
+#            OTA update settings/status after complete (or fix this)
+#
+#            make provision-list work without dd-wrt... rename provision_list and provision to provision_ddwrt and provision_native(?)
+#            make --settings work with provision-list and provision-settings, as defaults(?)
 #
 #  NICE-TO-HAVES:
 #            Insure it's a 2.4GHz network
 #            mDNS discovery?
+#            OTA from local webserver
+#            --ota-version-check=required|skip|try (in case redirect/forwarding would fail)
 #
-#            make provision-list work without dd-wrt... rename provision_list and provision to provision_ddwrt and provision_native(?)
+#            apply-list(?)  to apply --settings or --url to probe-list devices, instead of db
 #            Simplify some python2/3 compatibility per: http://python-future.org/compatible_idioms.html
 #            DeviceType -- limit provision-list to matching records -- provision-list to choose devices by DeviceType
+#            -U option to apply operation to make arbitray updates in device DB (for use prior to restore)
 #            --parallel=<n>  batched parallel firmware updating, n at a time, pausing between batches, or exiting if no more
 #            --group for "provision" -- add to group
 #            --prompt n,n,n  for use with "provision" to prompt for v,v,v giving individual values like StaticIP
-#            apply -U/--update option to change db entries
-#            apply --settings(?)
-#            poll command: like query/apply, for discovering/configuring battery powered/sparse-access devices
-#            Access=Constant/Sparse -- to indicate which devices shouldn't be expected online
-#            apply-list(?)
-#            make --settings work with provision-list and provision-settings, as defaults(?)
+#            Access=Continuous/Periodic -- to indicate which devices shouldn't be expected online
+#
+#  FUTURE:
+#            my.shelly.cloud API integration?
 #
 ######################################################################################################################
 
@@ -102,8 +114,10 @@ else:
     from StringIO import StringIO
     from urllib2 import HTTPError
 
+version = "1.0005"
+
 required_keys = [ 'SSID', 'Password' ]
-optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName', 'LatLng', 'TZ' ]
+optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName', 'LatLng', 'TZ', 'Access' ]
 default_query_columns = [ 'type', 'Origin', 'IP', 'ID', 'fw', 'has_update', 'settings.name' ] 
 
 exclude_setting = [ 'unixtime', 'fw', 'time', 'hwinfo', 'build_info', 'device', 'ison', 'has_timer', 'power', 'connected',
@@ -116,7 +130,6 @@ exclude_from_copy = [ 'actions.names','alt_modes','build_info','calibrated','dev
                       'device.num_meters','device.num_outputs','device.num_rollers','device.type','fw','hwinfo.batch_id','hwinfo.hw_revision',
                       'unixtime','settings.meters','settings.fw_mode','settings.login.default_username' ]
 
-version = "1.0003"
 init = None
 connect = None
 reconnect = None
@@ -132,7 +145,7 @@ device_queue = None
 factory_device_addr = "192.168.33.1"
 labelprinting = None
 
-def print_features( ):
+def help_features( ):
     print(dedent(""" 
                  Features:
 
@@ -168,13 +181,15 @@ def print_features( ):
                  added to the imported instructions for provision-list.
                  
                  There is a "factory-reset" operation which makes it easy to return a device to factory settings,
-                 given it is on the local WiFi network, and the "program" operation instructs local devices to take
+                 given it is on the local WiFi network, and the "flash" operation instructs local devices to take
                  an OTA firmware update.
 
                  Additionally, existing devices on the local WiFi network can be probed using the "probe-list" command
-                 to discover all of their settings and status.  A powerful "query" operation can report on any
-                 information found in the probe.  The "apply" operation allows programming the discovered devices with
-                 OTA firmware updates, as well as making arbitrary settings changes using the --url option.
+                 to discover all of their settings and status.  For battery-powered devices that are only periodically
+                 available on the network, the attribute Access=Periodic lets probe-list run for an extended period of 
+                 time looking frequently for the devices.  A powerful "query" operation can report on any information 
+                 found in the probe.  The "apply" operation allows programming the discovered devices with OTA firmware 
+                 updates, as well as making arbitrary settings changes using the --url option.
 
                  An "identify" operation is available to continually toggle on/off a light or relay, given an IP
                  address, in order to aid in identifying a device.  Useful, for instance, with multiple light bulbs
@@ -185,43 +200,84 @@ def print_features( ):
                  replacement device.
                  """) )
 
-def print_docs( ):
+def help_brief( ):
     print(dedent(""" 
                  usage: python automagic.py [options] OPERATION
 
-                 OPERATION is one of: help, provision-list, provision, factory-reset, program, ddwrt-learn, import, 
-                                      list, clear-list, print-sample, probe-list, probe-refresh, query, apply
+                 OPERATION is one of: help, provision-list, provision, factory-reset, flash, ddwrt-learn, import, 
+                                      list, clear-list, print-sample, probe-list, query, apply
 
                  More detailed information will follow a short description of all of these operations.
 
                  help               - shows this help guide
                  features           - gives a short explanation of the features of this utility
-                 provision-list     - configure a predefined list of devices on different networks
-                 provision          - configure devices onto the current WiFi network
-                 factory-reset      - factory reset a device
-                 program            - flash new firmware onto a device
-                 ddwrt-learn        - learn identity and settings of dd-wrt for use with provision-list
+
+                 provision          - configure any device(s) found in factory mode onto the current WiFi network
+
                  import             - import list of instructions for programming with provision-list
                  list               - shows the contents of the imported list of instructions
-                 clear-list         - erases the imported instructions
+                 clear-list         - erases the imported instructions for "list" operations
+                 provision-list     - configure devices found in factory reset mode onto a list of specified WiFi networks
+                 probe-list         - discovers information about devices in the import list (they must specify ProbeIP addresses)
+
+                 ddwrt-learn        - learn identity and settings of dd-wrt devices for use with provision-list
+                 factory-reset      - factory reset a device
+                 flash              - OTA (over the air) flash new firmware onto a device
                  print-sample       - sends a sample device info record to the custom label printing module (see --print-using)
-                 probe-list         - discovers information about devices in the imported list (they must specify ProbeIP addresses)
-                 probe-refresh      - updates information about devices previously imported using probe-list
-                 query              - list information from the device database formed from provision-list and probe-list operations
-                 apply              - apply --ota or --url to devices matching a query from the device database 
+                 query              - list information from the device database formed from provisioning and probing operations
+                 apply              - apply --ota, --url and --settings to devices matching a query from the device database
                  identify           - toggle power on/off on a given device to identify (by ip-address)
                  replace            - copy the settings of one device to another in the device database
 
                  Note that it is inadvisable to run multiple copies of this program while new devices are being
                  powered on to configure.  The program will automatically detect any new device and might attempt
                  to program it from two instances if run on multiple computers simultaneously.
+                """))
 
-
+def help_help( ):
+    print(dedent(""" 
                  help
                  ----
                  Prints the text you are reading now.
+                """))
 
+def help_provision( ):
+    print(dedent(""" 
+                 provision
+                 ---------
+                 The provision operation is used to provision devices to attach to the same WiFi network used by the laptop (or desktop)
+                 computer where the program is run.  Its functionality is limited in comparison to the provision-list operation, since all
+                 discovered devices will be attached to the same local network.
 
+                     --ssid (required)           SSID of the local WiFi network.
+
+                     --wait-time                 Time to wait on each pass looking for new devices, 0 for just once
+
+                     --ota PATH                  Apply OTA update of firmware after provisioning. PATH should specify an http path to
+                                                 the firmware, or "LATEST".
+
+                     --ota-timeout (-n)          Time in seconds to wait on OTA udpate. Default 300 (5 minutes).
+
+                     --prefix STRING             SSID prefix applied to discovering new devices (default: shelly)
+
+                     --time-to-pause (-p)        Time to pause after various provisioning steps
+
+                     --toggle                    After each device is provisioned, toggle it on/off repeatedly until it is unplugged.
+
+                     --cue                       After each device is provisioned, wait for the user to press enter before continuing.
+
+                     --print-using PYTHON-FILE   For each provisioned device, call a function "make_label," passing all information about
+                                                 the newly provisioned device as a python dict, as the single argument to make_label().
+
+                                                 ex: def make_label( dev_info ):
+                                                         print( repr( dev_info ) )
+
+                     --settings N=V,N=V...       Supply LatLng or other values to apply during provisioning step.  Supported attributes:
+                                                 DeviceName, LatLng, TZ
+                """))
+
+def help_provision_list( ):
+    print(dedent(""" 
                  provision-list
                  --------------
                  List provisioning is ideal for pre-configuring a large number of IoT devices intended to be deployed on different WiFi
@@ -283,8 +339,10 @@ def print_docs( ):
                      --prefix STRING             SSID prefix applied to discovering new devices (default: shelly)
 
                      --time-to-pause (-p)        Time to pause after various provisioning steps
+                """))
 
-
+def help_ddwrt_learn( ):
+    print(dedent(""" 
                  ddwrt-learn
                  -----------
                  Set up a DD-WRT router in access point mode, with DHCP server disabled, telnet enabled.  Use the username "admin"
@@ -312,8 +370,10 @@ def print_docs( ):
                      --ddwrt-address (-e)        IP address of dd-wrt device to learn about.  (required)
 
                      --ddwrt-password (-p)       Root password for dd-wrt device.  (required)
+                """))
 
-
+def help_import( ):
+    print(dedent(""" 
                  import
                  ------
                  The import command adds instructions to the queue of operations the provision-list command will perform.
@@ -371,7 +431,14 @@ def print_docs( ):
                                                  and managed using this program.  To import devices, set the ProbeIP to the device's
                                                  IP address and use the probe-list operation.
 
+                     Access                      Defines whether a device should be expected on the network continually, or, like
+                                                 some battery powered devices, only periodically. Values: Continuous or Periodic.
+                                                 Works in conjunction with ProbeIP and the probe-list operation to find periodic 
+                                                 devices which take much longer to discover.
+                """))
 
+def help_list( ):
+    print(dedent(""" 
                  list
                  ----
                  The list operator prints the pending operations in the device queue, imported using the import operation, and
@@ -379,13 +446,17 @@ def print_docs( ):
 
                      --group (-g) GROUP          Limit the operation to the set of instructions imported with the given "Group" ID.
                                                  If --group/-g is not specified, ALL imported instructions will be listed.
+                """))
 
-
+def help_clear_list( ):
+    print(dedent(""" 
                  clear-list
                  ----------
                  Erase the entire list of pending operations.
+                """))
 
-
+def help_probe_list( ):
+    print(dedent(""" 
                  probe-list
                  ----------
                  The probe-list operation gathers information about devices queued using the import command, with the ProbeIP field 
@@ -397,23 +468,16 @@ def print_docs( ):
                      --group (-g) GROUP          Limit the operation to the set of instructions imported with the given "Group" ID.
                                                  If --group/-g is not specified, ALL imported instructions will be probed.
 
-                     --match-tag                 Limit the query operation to devices with a selected tag.
+                     --match-tag (-t)            Limit the query operation to devices with a selected tag.
 
+                     --access Periodic|ALL|Co... Only probe devices that with Access=Continuous (default), Periodic, or ALL
 
-                 probe-refresh
-                 -------------
-                 The probe-refresh operation refreshes information about devices on the local network, previously discovered using the
-                 probe-list command, and stored in the device database.
+                     --refresh                   Refresh the db with attributes for all previously probed devices, rather than 
+                                                 using the import command.
+                """))
 
-                     --query-conditions          Use query-conditions to filter the devices that will be refreshed.  The query-conditions 
-                                                 option is a comma-delimited list of name=value pairs.
-
-                     --group (-g) GROUP          Limit the operation to the set of instructions imported with the given "Group" ID.
-                                                 If --group/-g is not specified, ALL imported instructions will be refreshed.
-
-                     --match-tag                 Limit the query operation to devices with a selected tag.
-
-
+def help_query( ):
+    print(dedent(""" 
                  query
                  -----
                  Print information about devices in the device database.  The device database is comprised of all devices that have
@@ -428,15 +492,17 @@ def print_docs( ):
 
                      --group (-g) GROUP          Limit the operation to the set of devices with the given "Group".
 
-                     --match-tag                 Limit the query operation to devices with a selected tag.
+                     --match-tag (-t)            Limit the query operation to devices with a selected tag.
 
-                     --set-tag                   Add a specified tag to each selected device.
+                     --set-tag (-T)              Add a specified tag to each selected device.
 
                      --delete-tag                Delete a specified tag from each selected device.
 
                      --refresh                   Refresh status and settings stored in the device DB for queried devices.
+                """))
 
-
+def help_schema( ):
+    print(dedent(""" 
                  schema
                  ------
                  The schema operaion displays the column list available for query-conditions and query-columns.  It scans the device 
@@ -450,8 +516,10 @@ def print_docs( ):
                      --group (-g) GROUP          Limit the operation to the set of devices with the given "Group".
 
                      --match-tag                 Limit the schema operation to devices with a selected tag.
+                """))
 
-
+def help_apply( ):
+    print(dedent(""" 
                  apply
                  -----
                  The apply operation is used to apply OTA updates or other settings to devices in the device database.  It functions
@@ -465,7 +533,9 @@ def print_docs( ):
 
                      --group (-g) GROUP          Limit the operation to the set of instructions imported with the given "Group" ID.
 
-                     --set-tag                   Add a specified tag to each selected device.
+                     --match-tag (-t)            Limit the query operation to devices with a selected tag.
+
+                     --set-tag (-T)              Add a specified tag to each selected device.
 
                      --delete-tag                Delete a specified tag from each selected device.
 
@@ -474,74 +544,53 @@ def print_docs( ):
 
                      --ota-timeout (-n)          Time in seconds to wait on OTA udpate. Default 300 (5 minutes).
 
-                     --url                       The --url option specifies an URL fragment like "/settings/?lat=31.32&lng=-98.324" to 
-                                                 be applied to each matching device.  The --url option can be repeated multiple times.  
-                                                 The Device IP will be prefixed to each specified URL fragment to produce a complete URL 
-                                                 like "http://192.168.1.10//settings/?lat=31.32&lng=-98.324"
-
                      --time-to-pause (-p)        Time to pause after various provisioning steps
-
-                     --refresh                   Refresh status and settings stored in the device DB for queried devices.
 
                      --delete-device DEVICE-ID   Provide device ID or "ALL" to delete queries devices from the device db.
 
                      --restore-device DEVICE-ID  Restores specified device, or with "ALL," those matching the -Q query to their settings
                                                  stored in the device db.
 
-                     --dry-run                   When used with --restore-device, displays, rather than executes, the steps which would 
-                                                 restore a device to the settings in the device db.
+                     --url                       The --url option specifies an URL fragment like "/settings/?lat=31.32&lng=-98.324" to 
+                                                 be applied to each matching device.  The --url option can be repeated multiple times.  
+                                                 The Device IP will be prefixed to each specified URL fragment to produce a complete URL 
+                                                 like "http://192.168.1.10//settings/?lat=31.32&lng=-98.324"
 
+                     --settings N=V,N=V...       Supply LatLng or other values to apply to all matching devices.  Supported attributes:
+                                                     DeviceName, LatLng, TZ
 
-                 provision
-                 ---------
-                 The provision operation is used to provision devices to attach to the same WiFi network used by the laptop (or desktop)
-                 computer where the program is run.  Its functionality is limited in comparison to the provision-list operation, since all
-                 discovered devices will be attached to the same local network.
+                     --dry-run                   When used with --restore-device, --url, and --settings, displays, rather than executes, 
+                                                 the steps (urls) which would be applied to each matching device.
 
-                     --ssid (required)           SSID of the local WiFi network.
+                     --refresh                   Refresh status and settings stored in the device DB for queried devices.  (Automatically
+                                                 applied after any --url, or --settings operation not specifying --dry-run.)
 
-                     --wait-time                 Time to wait on each pass looking for new devices, 0 for just once
+                     --access Periodic|ALL|Co... Only apply changes to devices that with Access=Continuous (default), Periodic, or ALL
+                """))
 
-                     --ota PATH                  Apply OTA update of firmware after provisioning. PATH should specify an http path to
-                                                 the firmware, or "LATEST".
-
-                     --ota-timeout (-n)          Time in seconds to wait on OTA udpate. Default 300 (5 minutes).
-
-                     --prefix STRING             SSID prefix applied to discovering new devices (default: shelly)
-
-                     --time-to-pause (-p)        Time to pause after various provisioning steps
-
-                     --toggle                    After each device is provisioned, toggle it on/off repeatedly until it is unplugged.
-
-                     --cue                       After each device is provisioned, wait for the user to press enter before continuing.
-
-                     --print-using PYTHON-FILE   For each provisioned device, call a function "make_label," passing all information about
-                                                 the newly provisioned device as a python dict, as the single argument to make_label().
-
-                                                 ex: def make_label( dev_info ):
-                                                         print( repr( dev_info ) )
-
-                     --settings N=V,N=V...       Supply LatLng or other values to apply during provisioning step.  Supported attributes:
-                                                 DeviceName, LatLng, TZ
-                                                 
-
+def help_factory_reset( ):
+    print(dedent(""" 
                  factory-reset
                  -------------
                  Performs a factory reset on the specified device.
 
                      --device-address (required) Address or DNS name of target device
+                """))
 
-
+def help_identify( ):
+    print(dedent(""" 
                  identify
                  --------
                  Toggles power on/off on a device to identify which device holds the specified address
 
                      --device-address (required) Address or DNS name of target device
+                """))
 
-
-                 program
-                 -------
-                 The program operation flashes firmware onto a specified device. (You can also use the --ota option with the "apply" operation
+def help_program( ):
+    print(dedent(""" 
+                 flash  
+                 -----
+                 The flash operation flashes firmware onto a specified device. (You can also use the --ota option with the "apply" operation
                  to flash multiple devices.
 
                      --device-address (required) Address or DNS name of target device
@@ -552,8 +601,10 @@ def print_docs( ):
                      --ota-timeout (-n)          Time in seconds to wait on OTA udpate. Default 300 (5 minutes).
 
                      --time-to-pause (-p)        Time to pause after various provisioning steps
+                """))
 
-
+def help_print_sample( ):
+    print(dedent(""" 
                  print-sample
                  ------------
                  The print-sample operation is used to test the label printing feature and the --print-using option.
@@ -563,7 +614,10 @@ def print_docs( ):
 
                                                  ex: def make_label( dev_info ):
                                                          print( repr( dev_info ) )
+                """))
 
+def help_replace( ):
+    print(dedent(""" 
                  replace
                  -------
                  Can be used to copy the settings in the device database from one device to another.  It only affects the settings in
@@ -574,6 +628,26 @@ def print_docs( ):
                      python automagic.py apply --restore 537B3C3F8823
           
                 """))
+
+def help_docs( ):
+    help_brief( )
+    help_help( )
+    help_provision( )
+    help_provision_list( )
+    help_ddwrt_learn( )
+    help_import( )
+    help_list( )
+    help_clear_list( )
+    help_probe_list( )
+    help_query( )
+    help_schema( )
+    help_apply( )
+    help_factory_reset( )
+    help_identify( )
+    help_program( )
+    help_print_sample( )
+    help_replace( )
+
 
 def compatibility( ):
     global url_read, http_post, urlquote, stringtofile, deep_update
@@ -763,7 +837,7 @@ def connect_to_known_router( ddwrt_name ):
     cn[ 'current_mode' ] = get_single_line_result( cn, "nvram get wl_mode" )
     return cn
 
-def apply( address, user, password ):
+def ddwrt_apply( address, user, password ):
     data = { 'submit_button':'index', 'action':'ApplyTake' }
     http_post( 'http://' + address + '/apply.cgi', data, user, password, 'http://' + address + '/Management.asp' )
 
@@ -781,7 +855,7 @@ def program_mode( cn, pgm, from_db, deletes=None ):
         get_single_line_result( cn, "stopservice nas;stopservice wlconf 2>/dev/null;startservice wlconf 2>/dev/null;startservice nas" )
     else:
         cn[ 'current_mode' ] = mode
-        apply( cn[ 'router' ][ 'address' ], 'admin', cn[ 'router' ][ 'password' ] )
+        ddwrt_apply( cn[ 'router' ][ 'address' ], 'admin', cn[ 'router' ][ 'password' ] )
         print( "changing dd-wrt modes... configuration sent, now waiting for dd-wrt to apply changes" )
         time.sleep( 5 )
         sync_connection( cn, b'', 20 )
@@ -844,13 +918,13 @@ def ddwrt_learn( ddwrt_name, ddwrt_address, ddwrt_password, ddwrt_file ):
 def noop( a = "" ):
     return( a )
 
-def v2_url_read( s, mode = 't' ):
+def v2_url_read( s, mode = 't', tmout = 2 ):
     if mode == 'b':
-        return urllib2.urlopen( s, timeout = 2 ).read( )
-    return urllib2.urlopen( s, timeout = 2 ).read( ).decode( 'utf8' )
+        return urllib2.urlopen( s, timeout = tmout ).read( )
+    return urllib2.urlopen( s, timeout = tmout ).read( ).decode( 'utf8' )
 
-def v3_url_read( s, mode = 't' ):
-    return urllib.request.urlopen( s, timeout = 2 ).read( )
+def v3_url_read( s, mode = 't', tmout = 2 ):
+    return urllib.request.urlopen( s, timeout = tmout ).read( )
 
 def v2_http_post( url, data, username, password, referrer ):
     post = url_encode( data )
@@ -896,7 +970,7 @@ def pc_get_cmd_output(cmd, key, err):
     output = subprocess.check_output( cmd, shell=True ).decode( 'utf8' )
     m = re.search( key + ' *:  *(.*)', output )
     if not m:
-         print( err )
+         eprint( err )
          sys.exit()
     return m.group(1).rstrip()
 
@@ -971,7 +1045,7 @@ def mac_connect( credentials, str, prefix = False, password = '', ignore_ssids =
         if verbose > 1: print(repr(networks))
     
         if not networks:
-            print( error )
+            eprint( error )
             return None
     
         found = None
@@ -990,7 +1064,7 @@ def mac_connect( credentials, str, prefix = False, password = '', ignore_ssids =
         if verbose > 1: print( 'Detected ' + found.ssid() )
         success, error = os_stash['iface'].associateToNetwork_password_error_(found, password, None)
         if error:
-             print(error)
+             eprint(error)
              return None
         return found.ssid()
     return None
@@ -998,7 +1072,7 @@ def mac_connect( credentials, str, prefix = False, password = '', ignore_ssids =
 def mac_reconnect( credentials ):
     return mac_connect( credentials, credentials['ssid'], prefix = False, password = credentials['password'] )
 
-def get_url( addr, tm, verbose, url, operation ):
+def get_url( addr, tm, verbose, url, operation, tmout = 2 ):
     for i in range( 5 ):
         contents=""
         raw_data=""
@@ -1007,7 +1081,7 @@ def get_url( addr, tm, verbose, url, operation ):
             if verbose > 1:
                 print( url )
         try:
-            raw_data = url_read( url )
+            raw_data = url_read( url, tmout = tmout )
             contents = json.loads( raw_data )
         except HTTPError as e:
             print('Error code:', e.code)
@@ -1059,8 +1133,11 @@ def get_actions( addr, tm, verbose ):
     url = "http://" + addr + "/settings/actions"
     return get_url( addr, tm, verbose, url, 'to read actions' )
 
-def ota_flash( addr, tm, fw, verbose ):
+def ota_flash( addr, tm, fw, verbose, dry_run ):
     url = ota_url( addr, fw )
+    if dry_run:
+        print( url )
+        return False
     return get_url( addr, tm, verbose, url, 'to flash firmware' )
 
 def fail_msg( s ):
@@ -1068,7 +1145,7 @@ def fail_msg( s ):
     print( s )
     for i in range(3): print( )
 
-def program_device( addr, pause_time, verbose, ota, ota_timeout, new_version ):
+def flash_device( addr, pause_time, verbose, ota, ota_timeout, new_version, dry_run ):
     print( "Checking old firmware version" )
     url = "http://" + addr + "/ota"
     result = get_url( addr, pause_time, verbose, url, 'to get current version' )
@@ -1082,7 +1159,7 @@ def program_device( addr, pause_time, verbose, ota, ota_timeout, new_version ):
     if result['status'] == 'updating':
         print( 'Error: Device already shows "updating"' )
         return False
-    if ota_flash( addr, pause_time, ota, verbose ):
+    if ota_flash( addr, pause_time, ota, verbose, dry_run ):
         print( "Sent OTA instructions to " + addr )
         print( "New Version: " + repr( new_version ) )
         if ota_timeout == 0: return True
@@ -1094,6 +1171,7 @@ def program_device( addr, pause_time, verbose, ota, ota_timeout, new_version ):
             passes += 1
             time.sleep( pause_time )
             new_result = get_url( addr, pause_time, verbose, url, '' )
+            if not new_result: return False
             if new_result['status'] == 'updating': 
                 if seen_updating:
                     print( '.', end='' )
@@ -1122,7 +1200,7 @@ def program_device( addr, pause_time, verbose, ota, ota_timeout, new_version ):
         return False
 
     else:
-        print( "Could not flash firmware to device " + addr )
+        if not dry_run: print( "Could not flash firmware to device " + addr )
         return False
     return True
 
@@ -1166,7 +1244,7 @@ def discover( cn, prefix ):
     cmd = "site_survey 2>&1"
     ( result, err ) = do_cmd( cn['conn'], cmd, cn['eot'] )
     if not result and err != '':
-        print( err )
+        eprint( err )
         sys.exit( )
     ret = []
     for n in range( 1, len( result ) ):
@@ -1175,12 +1253,12 @@ def discover( cn, prefix ):
             ret.append( r )
     return ret
 
-def check_for_device_queue( group = None, include_complete = False ):
+def check_for_device_queue( dq, group = None, include_complete = False ):
     txt = "Use import to specify some provisioning instructions."
-    if len( device_queue ) == 0:
+    if len( dq ) == 0:
         print( "List is empty. " + txt )
         sys.exit()
-    for rec in device_queue:
+    for rec in dq:
         if ( include_complete or 'CompletedTime' not in rec ) and ( not group or 'Group' in rec and rec[ 'Group' ] == group ):
             return
     if group:
@@ -1216,6 +1294,8 @@ def toggle_device( ip_address, dev_type ):
     fail_cnt = 0
     use_type = None
     while True:
+        result1 = '' 
+        result2 = ''
         # TODO: use dev_type to determine relay/light. For now, try both.
         if not use_type or use_type == 'light':
             try:
@@ -1294,7 +1374,7 @@ def flatten( d, prefix='', devtype = None ):
         result = { prefix : str( d ) }
     return [ result, guide ]
 
-def match_rec( rec, query_conditions, match_tag, group, restore_device ):
+def match_rec( rec, query_conditions, match_tag, group, restore_device, access ):
     for q in query_conditions:
         if q[0] not in rec or rec[q[0]] != q[1]:
             return False
@@ -1304,6 +1384,10 @@ def match_rec( rec, query_conditions, match_tag, group, restore_device ):
         return False
     if restore_device and restore_device != 'ALL' and restore_device != rec[ 'ID' ]:
         return False
+    if access != 'ALL':
+        presumed = 'Continuous' if 'Access' not in rec else rec[ 'Access' ]
+        if presumed != access:
+            return False
     return True
 
 def schema_details( col, coverage, verbosity ):
@@ -1355,7 +1439,7 @@ def schema( args ):
         if d == 'format':
             continue
         ( data, new_guide ) = flatten( device_db[ d ] )
-        if match_rec( data, query_conditions, args.match_tag, args.group, None ):
+        if match_rec( data, query_conditions, args.match_tag, args.group, None, args.access ):
             u.update( data )
             guide = deep_update( new_guide, guide )
     k = sorted( u.keys() )
@@ -1380,8 +1464,113 @@ def schema( args ):
                 or z and z == '' and path and not ( path.startswith('settings.') or path.startswith('status.') ):
                    print_details( s[0], s[1] if len(s) > 1 else None, args.verbose, max_width )
 
+def apply( args, new_version, data, need_write ):
+    configured_settings = None
+
+    if args.ota != '':
+        flash_device( data[ 'IP' ], args.pause_time, args.verbose, args.ota, args.ota_timeout, new_version, args.dry_run )
+
+    if args.apply_urls:
+        for url in args.apply_urls:
+            if args.dry_run:
+                print( 'http://' + data[ 'IP' ] + url, 'to apply ' + url )
+            else:
+                got = get_url( data[ 'IP' ], args.pause_time, args.verbose, 'http://' + data[ 'IP' ] + url, 'to apply ' + url )
+                if not args.settings:
+                    configured_settings = get_url( data[ 'IP' ], args.pause_time, args.verbose, get_settings_url( data[ 'IP' ] ), 'to get config' )
+                    need_write = True
+
+    if args.settings:
+        new_settings = dict( get_name_value_pairs( args.settings, term_type = '--settings' ) )
+        if args.dry_run:
+            print( get_settings_url( data[ 'IP' ], new_settings ) )
+        else:
+            # apply_urls (above) depends on this, if both are used (to save time):
+            configured_settings = get_url( data[ 'IP' ], args.pause_time, args.verbose, get_settings_url( data[ 'IP' ], new_settings ), 'to get config' )
+            need_write = True
+
+    if args.delete_device and ( args.delete_device == 'ALL' or args.delete_device == data[ 'ID' ] ):
+        del device_db[ data[ 'ID' ] ]
+        need_write = True
+
+    if args.restore_device and ( args.restore_device == 'ALL' or args.restore_device == data[ 'ID' ] ):
+        settings = device_db[ data[ 'ID' ] ][ 'settings' ]
+        http_args = {}
+        apply_list = []
+
+        for s in settings:
+            fields = settings[ s ]
+            if type( fields ) == type( {} ):
+                if s in exclude_setting: continue
+                s = re.sub( '^wifi_', '', s )
+                if s == 'sntp':
+                    apply_list.append( 'http://' + data[ 'IP' ] + '/settings/?' + url_encode( { 'sntp_server' : '' if fields['enabled'] == 'false' else fields[ 'server' ] } ) )
+                elif s == 'mqtt':
+                    flds = dict( [ [ 'mqtt_' + f, fields[ f ] ] for f in fields ] )
+                    apply_list.append( 'http://' + data[ 'IP' ] + '/settings/?' + url_encode( flds ) )
+                elif s == 'coiot':
+                    flds = dict( [ [ 'coiot_' + f, fields[ f ] ] for f in fields ] )
+                    apply_list.append( 'http://' + data[ 'IP' ] + '/settings/?' + url_encode( flds ) )
+                else:
+                    apply_list.append( 'http://' + data[ 'IP' ] + '/settings/' + s + '?' + url_encode( fields ) )
+            elif type( fields ) == type( [] ):
+                if s in exclude_setting: continue
+                name = re.sub( 's$', '', s )
+                for i in range( len( fields ) ):
+                    channel = fields[ i ]
+                    if type( channel ) == type( {} ):
+                        flds = dict( [ [ f, channel[ f ] ] for f in channel if f not in exclude_setting ] )
+                        apply_list.append( 'http://' + data[ 'IP' ] + '/settings/' + name + '/' + str( i ) + '/?' + url_encode( flds ) )
+                        if 'schedule' in channel and 'schedule_rules' in channel:
+                             rules = ','.join( channel[ 'schedule_rules' ] )
+                             apply_list.append( 'http://' + data[ 'IP' ] + '/settings/' + name + '/' + str( i ) + '/?' + \
+                                url_encode( { 'schedule' : channel[ 'schedule' ], 'schedule_rules': rules } ).replace("schedule_rules=%5B%5D","").replace("%5B","[").replace("%5D","]" ) )
+                    ### else:  'alt_modes' : 'white' ???
+            elif s not in exclude_setting:
+                http_args[ s ] = fields
+
+        apply_list.append( 'http://' + data[ 'IP' ] + '/settings?' + url_encode( http_args ) )
+                
+        if 'actions' in device_db[ data[ 'ID' ] ]:
+            actions = device_db[ data[ 'ID' ] ][ 'actions' ]
+            for a in actions:
+                for u in actions[ a ]:
+                    ### btn_on_url: [{u'index': 0, u'enabled': True, u'urls': [u'http://192.168.1.254/zzzfoo']}]
+                    http_args = [ ( 'urls[]', x ) for x in u[ 'urls' ] ]
+                    http_args.append( ( 'name', a ) )
+                    for p in u:
+                        if p != 'urls':
+                            http_args.append( ( p, u[ p ] ) )
+                    apply_list.append( 'http://' + data[ 'IP' ] + '/settings/actions?' + url_encode( http_args ) )
+
+        if args.dry_run:
+             for u in apply_list:
+                   print(u)
+             print( )
+        else:
+             for u in apply_list:
+                 got = get_url( data[ 'IP' ], args.pause_time, args.verbose, u, None)
+                 if not got:
+                     print( "could not apply " + u )
+                 time.sleep( .1 )
+                 sys.stdout.write( "." )
+                 sys.stdout.flush()
+             print( )
+             configured_settings = get_url( data[ 'IP' ], args.pause_time, args.verbose, get_settings_url( data[ 'IP' ] ), 'to get config' )
+             need_write = 1
+
+    return( configured_settings, need_write )
+
 def short_heading( c ):
     return c if re.search( '\.[0-9]+\.', c ) else re.sub( '.*\.', '', c )
+
+def find_device( dev ):
+    try:
+        attempt = url_read( 'http://' + dev[ 'ProbeIP' ] + '/ota', tmout = 0.5 )
+    except:
+        attempt = None
+    if attempt: return True
+    return False
 
 def query( args, new_version = None ):
     global device_db
@@ -1395,6 +1584,9 @@ def query( args, new_version = None ):
         query_columns.extend( re.sub('^\+','',args.query_columns).split(',') )
     else:
         query_columns = args.query_columns.split(',') if args.query_columns else default_query_columns
+
+    delete_list = [ q.replace("-","") for q in query_columns if q.startswith("-") ]
+    query_columns = [ q for q in query_columns if q not in delete_list and not q.startswith("-") ]
 
     query_conditions = get_name_value_pairs( args.query_conditions )
 
@@ -1437,8 +1629,10 @@ def query( args, new_version = None ):
 
     k = list( results[0][0].keys( ) )[0]
     results.sort( key=lambda x: x[0][k], reverse=False )
+    todo = []
+    nogo = []
     for ( res, data ) in results:
-        if match_rec( data, query_conditions, args.match_tag, args.group, args.restore_device ):
+        if match_rec( data, query_conditions, args.match_tag, args.group, args.restore_device, args.access ):
             if args.set_tag or args.delete_tag:
                 need_write = True
                 old_tags = data['Tags'].split(',') if 'Tags' in data and data['Tags'] != '' else []
@@ -1451,141 +1645,121 @@ def query( args, new_version = None ):
             for c in query_columns:
                 hc = c if args.verbose > 0 else short_heading( c )
                 result += res[ c ].ljust( column_widths[ hc ]+1 )
-            print( result )
-            if args.operation == 'apply':
-                if args.ota != '':
-                    if 'IP' in data:
-                        program_device( data[ 'IP' ], args.pause_time, args.verbose, args.ota, args.ota_timeout, new_version )
 
-                if args.apply_urls:
-                    for url in args.apply_urls:
-                        got = get_url( data[ 'IP' ], args.pause_time, args.verbose, 'http://' + data[ 'IP' ] + url, 'to apply ' + url )
+            if 'IP' not in data:
+                nogo.append( [ result, res, data ] )
+            else:
+                todo.append( [ result, res, data ] )
 
-                if args.delete_device and ( args.delete_device == 'ALL' or args.delete_device == data[ 'ID' ] ):
-                    del device_db[ data[ 'ID' ] ]
-                    need_write = True
+    for (result, res, data) in todo:
+         print( result )
 
-                if args.restore_device and ( args.restore_device == 'ALL' or args.restore_device == data[ 'ID' ] ):
-                    settings = device_db[ data[ 'ID' ] ][ 'settings' ]
-                    http_args = {}
-                    apply_list = []
-                    if 'IP' not in data:
-                        print( 'Device ' + data[ 'ID' ] + ' has no IP stored' )
-                        continue
-                    for s in settings:
-                        fields = settings[ s ]
-                        if type( fields ) == type( {} ):
-                            if s in exclude_setting: continue
-                            s = re.sub( '^wifi_', '', s )
-                            if s == 'sntp':
-                                apply_list.append( 'http://' + data[ 'IP' ] + '/settings/?' + url_encode( { 'sntp_server' : '' if fields['enabled'] == 'false' else fields[ 'server' ] } ) )
-                            elif s == 'mqtt':
-                                flds = dict( [ [ 'mqtt_' + f, fields[ f ] ] for f in fields ] )
-                                apply_list.append( 'http://' + data[ 'IP' ] + '/settings/?' + url_encode( flds ) )
-                            elif s == 'coiot':
-                                flds = dict( [ [ 'coiot_' + f, fields[ f ] ] for f in fields ] )
-                                apply_list.append( 'http://' + data[ 'IP' ] + '/settings/?' + url_encode( flds ) )
-                            else:
-                                apply_list.append( 'http://' + data[ 'IP' ] + '/settings/' + s + '?' + url_encode( fields ) )
-                        elif type( fields ) == type( [] ):
-                            if s in exclude_setting: continue
-                            name = re.sub( 's$', '', s )
-                            for i in range( len( fields ) ):
-                                channel = fields[ i ]
-                                if type( channel ) == type( {} ):
-                                    flds = dict( [ [ f, channel[ f ] ] for f in channel if f not in exclude_setting ] )
-                                    apply_list.append( 'http://' + data[ 'IP' ] + '/settings/' + name + '/' + str( i ) + '/?' + url_encode( flds ) )
-                                    if 'schedule' in channel and 'schedule_rules' in channel:
-                                         rules = ','.join( channel[ 'schedule_rules' ] )
-                                         apply_list.append( 'http://' + data[ 'IP' ] + '/settings/' + name + '/' + str( i ) + '/?' + \
-                                            url_encode( { 'schedule' : channel[ 'schedule' ], 'schedule_rules': rules } ).replace("schedule_rules=%5B%5D","").replace("%5B","[").replace("%5D","]" ) )
-                                ### else:  'alt_modes' : 'white' ???
-                        elif s not in exclude_setting:
-                            http_args[ s ] = fields
+    if args.operation == 'apply':
+        print( )
+        if nogo:
+            print( "These devices have no stored IP. No changes will be applied." )
+            for (result, res, data) in nogo:
+                print( data[ 'ID' ] )
+            print( )
 
-                    apply_list.append( 'http://' + data[ 'IP' ] + '/settings?' + url_encode( http_args ) )
-                            
-                    if 'actions' in device_db[ data[ 'ID' ] ]:
-                        actions = device_db[ data[ 'ID' ] ][ 'actions' ]
-                        for a in actions:
-                            for u in actions[ a ]:
-                                ### btn_on_url: [{u'index': 0, u'enabled': True, u'urls': [u'http://192.168.1.254/zzzfoo']}]
-                                http_args = [ ( 'urls[]', x ) for x in u[ 'urls' ] ]
-                                http_args.append( ( 'name', a ) )
-                                for p in u:
-                                    if p != 'urls':
-                                        http_args.append( ( p, u[ p ] ) )
-                                apply_list.append( 'http://' + data[ 'IP' ] + '/settings/actions?' + url_encode( http_args ) )
+        if todo:
+            print( "Applying changes..." )
 
-                    if args.dry_run:
-                         for u in apply_list:
-                               print(u)
-                         print( )
-                    else:
-                         for u in apply_list:
-                             got = get_url( data[ 'IP' ], args.pause_time, args.verbose, u, None)
-                             if not got:
-                                 print( "could not apply " + u )
-                             time.sleep( .1 )
-                             sys.stdout.write( "." )
-                             sys.stdout.flush()
-                         print( )
+        done = []
+        while( todo ):
+            for (result, res, data) in todo:
+                if find_device( data ):
+                    done.append( [ result, res, data ] )
+                    print( data[ 'IP' ] )
+                    ( configured_settings, need_write ) = apply( args, new_version, data, need_write )
+            todo = [ r for r in todo if r not in done ]
+
+        if configured_settings:
+            device_db[ data[ 'ID' ] ][ 'settings' ] = configured_settings
 
     if need_write:
         write_json_file( args.device_db, device_db )
 
-def probe_list( args ):
-    global device_queue, device_db
-    query_conditions = [ x.split('=') for x in args.query_conditions.split(',') ] if args.query_conditions else []
-    if args.operation == 'probe-list':
-        check_for_device_queue( args.group, True )
-        dq = device_queue
-    elif args.operation in ( 'probe-refresh', 'query', 'apply', 'schema' ):
-        dq = [ device_db[ k ] for k in device_db.keys() if 'ProbeIP' in device_db[ k ] ]
-    probe_count = 0
-    if args.refresh:
-        eprint( "Refreshing info from network devices" )
-    for rec in dq:
-        if not match_rec( rec, query_conditions, args.match_tag, args.group, None ) or 'ProbeIP' not in rec: 
-            continue
-        sys.stdout.write( "." )
-        sys.stdout.flush()
+def complete_probe( args, rec, initial_status = None ):
+    global device_db
 
-        probe_count += 1
-        ip_address = rec[ 'ProbeIP' ]
-
-        if not args.refresh: eprint( ip_address )
+    ip_address = rec[ 'ProbeIP' ]
+    if not args.refresh or args.operation == 'probe-list': eprint( ip_address )
+    if not initial_status:
         initial_status = get_url( ip_address, args.pause_time, args.verbose, status_url( ip_address ), 'to get current status' )
-        if initial_status:
-            configured_settings = get_url( ip_address, args.pause_time, args.verbose, get_settings_url( ip_address ), 'to get config' )
-            actions = get_actions( ip_address, 1, args.verbose )
-            if actions and 'actions' in actions:
-                rec['actions'] = actions[ 'actions' ]
-            id = initial_status['mac']
-            if id in device_db:
-                rec.update( device_db[ id ] )
-            else:
-                rec['ProbeTime'] = time.time()
-            rec['UpdateTime'] = time.time()
-            rec['status'] = initial_status
-            if configured_settings:
-                rec['settings'] = configured_settings
-                rec['CompletedTime'] = time.time()
-            else:
-                print( "Failed to update settings for " + id )
-            rec['Origin'] = 'probe-list'
-            rec['IP'] = ip_address
-            rec['ID'] = id
-            device_db[ id ] = rec
-            if probe_count % 10 == 0:
+    if initial_status:
+        if args.verbose > 1:
+            print( ip_address )
+        configured_settings = get_url( ip_address, args.pause_time, args.verbose, get_settings_url( ip_address ), 'to get config' )
+        actions = get_actions( ip_address, 1, args.verbose )
+        if actions and 'actions' in actions:
+            rec['actions'] = actions[ 'actions' ]
+        id = initial_status['mac']
+        if id in device_db:
+            rec.update( device_db[ id ] )
+        else:
+            rec['ProbeTime'] = time.time()
+        rec['UpdateTime'] = time.time()
+        rec['status'] = initial_status
+        if configured_settings:
+            rec['settings'] = configured_settings
+            rec['CompletedTime'] = time.time()
+        else:
+            print( "Failed to update settings for " + id )
+        rec['Origin'] = 'probe-list'
+        rec['IP'] = ip_address
+        rec['ID'] = id
+        device_db[ id ] = rec
+
+def probe_list( args ):
+    query_conditions = [ x.split('=') for x in args.query_conditions.split(',') ] if args.query_conditions else []
+    if args.refresh:
+        dq = [ device_db[ k ] for k in device_db.keys() if 'ProbeIP' in device_db[ k ] ]
+    else:
+        dq = device_queue
+
+    todo = []
+    for rec in dq:
+        if match_rec( rec, query_conditions, args.match_tag, args.group, None, args.access ) and 'ProbeIP' in rec: 
+            todo.append( rec )
+
+    if not args.refresh:
+        check_for_device_queue( todo, args.group, True )
+
+    if args.refresh and args.operation != 'probe-list':
+        eprint( "Refreshing info from network devices" )
+
+    done = []
+    probe_count = 1
+    need_write = False
+    # todo: Look for Periodic-type devices in queue and message that it might take a while
+    while len( todo ):
+        #sys.stdout.write( "." )
+        #sys.stdout.flush()
+        for rec in todo:
+            if need_write and ( probe_count % 10 == 0 or 'Access' in rec and rec[ 'Access' ] == 'Periodic' ):
                 write_json_file( args.device_db, device_db )
-    print( )
-    write_json_file( args.device_db, device_db )
+            initial_status = None
+            try:
+                initial_status = json.loads( url_read( status_url( rec[ 'ProbeIP' ] ), tmout = 0.5 ) )
+                break
+            except:
+                pass
+        if initial_status:
+            done.append( rec )
+            complete_probe( args, rec, initial_status )
+            need_write = True
+            probe_count += 1
+        time.sleep( 0.5 )
+        todo = [ r for r in todo if r not in done ]
+
+    if need_write:
+        write_json_file( args.device_db, device_db )
 
 def provision_list( args, new_version ):
     global device_queue, device_db
     t1 = timeit.default_timer()
-    check_for_device_queue( args.group )
+    check_for_device_queue( device_queue, args.group )
     ( ap_node, sta_node ) = choose_roles( args.ddwrt_name )
     if args.timing: print( 'setup time: ', round( timeit.default_timer() - t1, 2 ) )
     setup_count = 0
@@ -1734,12 +1908,17 @@ def append_list( l ):
                         print( "Record " + str( n ) + " contains improper TZ. Must be of the form tz_dst:tz_dst_auto:tz_utc_offset:tzautodetect" )
                         sys.exit( )
 
+                if k == 'Access' and row[ k ]:
+                    if row[ k ] not in ( 'Continuous', 'Periodic' ):
+                        print( "Record " + str( n ) + " contains improper Access value. Must be one of Continuous or Periodic" )
+                        sys.exit( )
+
                 r[ k ] = row[ k ]
         r[ 'InsertTime' ] = time.time()
         device_queue.append( r )
 
 def print_list( queue_file, group ):
-    check_for_device_queue( group )
+    check_for_device_queue( device_queue, group )
 
     print( "List of devices for probe-list or provision-list operation" )
     header = [ 'ProbeIP', 'Group', 'SSID', 'Password', 'StaticIP', 'NetMask', 'Gateway', 'DeviceName', 'InsertTime' ]
@@ -1804,7 +1983,7 @@ def finish_up_device( device, rec, operation, args, new_version, initial_status,
     #    rec['settings'] = new_settings
 
     if args.ota != '':
-        if program_device( device, args.pause_time, args.verbose, args.ota, args.ota_timeout, new_version ):
+        if flash_device( device, args.pause_time, args.verbose, args.ota, args.ota_timeout, new_version, args.dry_run ):
     #        need_update = True
             new_status = get_status( device, args.pause_time, args.verbose )
             rec['status'] = new_status if new_status else {}
@@ -1875,7 +2054,7 @@ def provision( credentials, args, new_version ):
                             print( repr( content ) )
                         got_one = True
                     except:
-                        if not got_one: print( "Unexpected error:", sys.exc_info( )[0] )
+                        if not got_one: eprint( "Unexpected error:", sys.exc_info( )[0] )
                 if got_one: break
             if not got_one:
                 print( "Tried 15 times and could not instruct device to set up network" )
@@ -1957,9 +2136,8 @@ def validate_options( vars ):
               "query" : [ "query_conditions", "query_columns", "group", "set_tag", "match_tag", "delete_tag", "refresh" ],
               "schema" : [ "query_conditions", "query_columns", "group", "match_tag", "refresh" ],
               "apply" : [ "query_conditions", "query_columns", "group", "set_tag", "match_tag", "delete_tag", 
-                          "ota", "apply_urls", "refresh", "delete_device", "restore_device", "dry_run" ],
-              "probe-list" : [ "query_conditions", "group" ],
-              "probe-refresh" : [ "query_conditions", "group" ],
+                          "ota", "apply_urls", "refresh", "delete_device", "restore_device", "dry_run", "settings", "access" ],
+              "probe-list" : [ "query_conditions", "group", "refresh", "access" ],
               "provision-list" : [ "group", "ddwrt_name", "group", "cue", "timing", "ota", "print_using", "toggle", "wait_time" ],
               "provision" : [ "ssid", "wait_time", "ota", "print_using", "toggle", "cue", "settings" ],
               "list" : [ "group" ],
@@ -1968,7 +2146,7 @@ def validate_options( vars ):
 
     require = { "factory-reset" : [ "device_address" ],
                 "identify" : [ "device_address" ],
-                "program" : [ "device_address", "ota" ],
+                "flash" : [ "device_address", "ota" ],
                 "ddwrt-learn" : [ "ddwrt_name", "ddwrt_address", "ddwrt_password" ],
                 "import" : [ "file" ],
                 "replace" : [ "from_device", "to_device" ],
@@ -1981,7 +2159,7 @@ def validate_options( vars ):
          else:
              allow[ r ] = require[ r ]
 
-    for z in [ v for v in vars if vars[ v ] and v not in ( 'operation', 'ddwrt_file', 'pause_time', 'ota_timeout', 'device_db', 'prefix', 'device_queue', 'verbose' ) ]:
+    for z in [ v for v in vars if vars[ v ] and v not in ( 'access', 'operation', 'ddwrt_file', 'pause_time', 'ota_timeout', 'device_db', 'prefix', 'device_queue', 'verbose' ) ]:
         if z not in allow[ op ]:
             incompatible.append( z.replace( "_", "-" ) )
     if len( incompatible ) > 1:
@@ -2021,18 +2199,19 @@ def main():
     p.add_argument( '-e', '--ddwrt-address', metavar='IP-ADDRESS', help='IP address of dd-wrt device to use to configure target device' )
     p.add_argument( '-P', '--ddwrt-password', metavar='PASSWORD', help='Password for dd-wrt device' )
     p.add_argument( '-F', '--force-platform',  metavar='platform', help='Force platform choice: PC|MAC|linux', choices=('PC','MAC','linux') )
-    p.add_argument( '-r', '--refresh', action='store_true', help='Run a probe-refresh operation prior to query' )
+    p.add_argument( '-r', '--refresh', action='store_true', help='Refresh the db with attributes probed from device before completing operation' )
+    p.add_argument(       '--access', default=None, help='Restrict apply and probe operations to Continuous, Periodic, or ALL devices', choices=['ALL','Continuous','Periodic'] )
     p.add_argument(       '--toggle', action='store_true', help='Toggle relay on devices after each is provisioned' )
     p.add_argument(       '--device-queue', default='provisionlist.json', help='Location of json database of devices to be provisioned with provision-list' )
     p.add_argument(       '--ddwrt-file', default='ddwrt_db.json', help='File to keep ddwrt definitions' )
     p.add_argument(       '--print-using', metavar='PYTHON-FILE', help='Python program file containing a function, "make_label", for labeling provisioned devices' )
     p.add_argument(       '--device-db', default='iot-devices.json', help='Device database file (default: iot-devices.json)' )
-    p.add_argument(       '--ota', dest='ota', metavar='http://...|LATEST', default='', help='OTA firmware to update after provisioning, or with "program" or "apply" operation' )
+    p.add_argument(       '--ota', dest='ota', metavar='http://...|LATEST', default='', help='OTA firmware to update after provisioning, or with "flash" or "apply" operation' )
     p.add_argument( '-n', '--ota-timeout', metavar='SECONDS', default=300, type=int, help='Time in seconds to wait on OTA udpate. Default 300 (5 minutes). Use 0 to skip check (inadvisable)' )
     p.add_argument(       '--url', dest='apply_urls', action='append', help='URL fragments to apply, i.e "/settings/?lat=31.366398&lng=-96.721352"' )
     p.add_argument(       '--cue', action='store_true', help='Ask before continuing to provision next device' )
     p.add_argument(       '--timing', action='store_true', help='Show timing of steps during provisioning' )
-    p.add_argument( '-q', '--query-columns', help='Comma separated list of columns to output, start with "+" to also include default columns' )
+    p.add_argument( '-q', '--query-columns', help='Comma separated list of columns to output, start with "+" to also include all default columns, "-" to exclude specific defaults' )
     p.add_argument( '-Q', '--query-conditions', help='Comma separated list of name=value selectors' )
     p.add_argument( '-t', '--match-tag', help='Tag to limit query and apply operations' )
     p.add_argument( '-T', '--set-tag', help='Tag results of query operation' )
@@ -2041,14 +2220,15 @@ def main():
     p.add_argument(       '--restore-device', metavar='DEVICE-ID|ALL', help='Restore settings of devices matching query' )
     p.add_argument(       '--from-device', metavar='DEVICE-ID', help='Device db entry from which to copy settings using the replace operation' )
     p.add_argument(       '--to-device', metavar='DEVICE-ID', help='Device db entry to receive the copy of settings using the replace operation' )
-    p.add_argument(       '--dry-run', action='store_true', help='Display urls to apply instead of performing --restore' )
+    p.add_argument(       '--dry-run', action='store_true', help='Display urls to apply instead of performing --restore or --settings' )
     p.add_argument(       '--settings', help='Comma separated list of name=value settings for use with provision operation' )
     p.add_argument( metavar='OPERATION',
-                    help='help|features|provision|provision-list|factory-reset|program|import|' + \
-                         'ddwrt-learn|list|clear-list|print-sample|probe-list|probe-refresh|query|apply|schema|identify|replace',
+                    help='help|features|provision|provision-list|factory-reset|flash|import|' + \
+                         'ddwrt-learn|list|clear-list|print-sample|probe-list|query|' + \
+                         'apply|schema|identify|replace',
                     dest="operation", 
-                    choices=('help','features','provision-list','provision','factory-reset','program','import', 'ddwrt-learn','list',
-                             'clear-list','print-sample','probe-list','probe-refresh', 'query', 'apply', 'schema', 'identify', 'replace' ) )
+                    choices=('help','features','provision-list','provision','factory-reset','flash','import', 'ddwrt-learn','list',
+                             'clear-list','print-sample','probe-list', 'query', 'apply', 'schema', 'identify', 'replace' ) )
 
     try:
         args = p.parse_args( )
@@ -2063,8 +2243,14 @@ def main():
 
     new_version = None
 
+    if not args.access:
+        if args.operation in ( 'query' ):
+            args.access = 'ALL'
+        else:
+            args.access = 'Continuous'
+
     if args.operation == 'help':
-        print_docs( )
+        help_docs( )
         return
 
     if args.operation == 'features':
@@ -2118,7 +2304,11 @@ def main():
 
     if args.ota and args.ota != 'LATEST':
         if args.verbose > 0: print( "Checking version of OTA firmware" )
-        contents = url_read( args.ota, 'b' )
+        try:
+            contents = url_read( args.ota, 'b', tmout=60 )
+        except:
+             eprint( "Unexpected error:", sys.exc_info( )[0] )
+             contents = None
         if not contents or not zipfile.is_zipfile( stringtofile( contents ) ):
             print( "Could not fetch OTA firmware" )
             return
@@ -2137,7 +2327,7 @@ def main():
     if args.print_using:
         import_label_lib( args.print_using )
 
-    if args.operation in [ 'provision-list', 'probe-list', 'probe-refresh', 'query', 'apply', 'schema', 'provision', 'replace' ]:
+    if args.operation in [ 'provision-list', 'probe-list', 'query', 'apply', 'schema', 'provision', 'replace' ]:
         device_db = read_json_file( args.device_db, {}, True )
         device_db[ 'format' ] = 'automagic'
 
@@ -2165,8 +2355,8 @@ def main():
     elif args.operation == 'factory-reset':
         factory_reset( args.device_address, args.verbose )
 
-    elif args.operation == 'program':
-        program_device( args.device_address, args.pause_time, args.verbose, args.ota, args.ota_timeout, new_version )
+    elif args.operation == 'flash':
+        flash_device( args.device_address, args.pause_time, args.verbose, args.ota, args.ota_timeout, new_version, args.dry_run )
 
     elif args.operation == 'ddwrt-learn':
         ddwrt_learn( args.ddwrt_name[0], args.ddwrt_address, args.ddwrt_password, args.ddwrt_file )
@@ -2186,10 +2376,7 @@ def main():
     elif args.operation == 'print-sample':
          test_print( )
 
-    elif args.operation == 'probe-list':
-        probe_list( args )
-
-    elif args.operation == 'probe-refresh':
+    elif args.operation in ( 'probe-list' ):
         probe_list( args )
 
     elif args.operation == 'query':
@@ -2224,7 +2411,7 @@ if __name__ == '__main__':
 ###   curl -u admin:pw --referer http://192.168.1.1/Management.asp --http1.1 http://192.168.1.1/apply.cgi -d "submit_button=Status_Internet&action=Apply&change_action=gozila_cgi&submit_type=Disconnect_pppoe
 ###   curl -u admin:pw --referer http://192.168.1.1/Management.asp --http1.1 http://192.168.1.1/apply.cgi -d "submit_button=index&action=ApplyTake&change_action=&submit_type="
 
-#def apply( tn, mode ):
+#def ddwrt_apply( tn, mode ):
 #    """failed attempt to do everything the "apply" button in the GUI does, to avoid needing to use http/CGI approach (which takes 20s)"""
 #    if mode == 'sta':
 #        get_single_line_result( tn, "/sbin/ifconfig eth2 192.168.33.10" )
