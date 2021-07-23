@@ -119,6 +119,8 @@ required_keys = [ 'SSID', 'Password' ]
 optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName', 'LatLng', 'TZ', 'Access' ]
 default_query_columns = [ 'type', 'Origin', 'IP', 'ID', 'fw', 'has_update', 'settings.name' ] 
 
+all_operations = ( 'help','features','provision-list','provision','factory-reset','flash','import', 'ddwrt-learn','list', 'clear-list','print-sample','probe-list', 'query', 'apply', 'schema', 'identify', 'replace' )
+
 exclude_setting = [ 'unixtime', 'fw', 'time', 'hwinfo', 'build_info', 'device', 'ison', 'has_timer', 'power', 'connected',
         'ext_humidity','ext_switch','ext_sensors','ext_temperature',    #TODO  -- parameter
         'actions',                                                      # handled differently
@@ -199,7 +201,7 @@ def help_features( ):
                  replacement device.
                  """) )
 
-def help_brief( ):
+def help_operations( ):
     print(dedent(""" 
                  usage: python automagic.py [options] OPERATION
 
@@ -233,11 +235,23 @@ def help_brief( ):
                  to program it from two instances if run on multiple computers simultaneously.
                 """))
 
+
+def more_help( ):
+    print(dedent(""" 
+
+                 More help is available for each operation above. Try "help provision" or "help features".
+                 You can also try "help all".
+                """))
+
+def help_commands( ):
+    help_operations( )
+
 def help_help( ):
     print(dedent(""" 
                  help
                  ----
-                 Prints the text you are reading now.
+                 Prints the text you are reading now.  Additional help for each operation is available.  Try "help provision" for example.
+                 To see all help, try "help all".  An overview of the program's functionalities is available too: "help features".
                 """))
 
 def help_provision( ):
@@ -585,12 +599,12 @@ def help_identify( ):
                      --device-address (required) Address or DNS name of target device
                 """))
 
-def help_program( ):
+def help_flash( ):
     print(dedent(""" 
                  flash  
                  -----
                  The flash operation flashes firmware onto a specified device. (You can also use the --ota option with the "apply" operation
-                 to flash multiple devices.
+                 to flash multiple devices.)
 
                      --device-address (required) Address or DNS name of target device
 
@@ -628,25 +642,34 @@ def help_replace( ):
           
                 """))
 
-def help_docs( ):
-    help_brief( )
-    help_help( )
-    help_provision( )
-    help_provision_list( )
-    help_ddwrt_learn( )
-    help_import( )
-    help_list( )
-    help_clear_list( )
-    help_probe_list( )
-    help_query( )
-    help_schema( )
-    help_apply( )
-    help_factory_reset( )
-    help_identify( )
-    help_program( )
-    help_print_sample( )
-    help_replace( )
-
+def help_docs( what ):
+    if not what:
+        help_operations( )
+        more_help( )
+    elif what[0] == "all":
+        help_operations( )
+        help_help( )
+        help_provision( )
+        help_provision_list( )
+        help_ddwrt_learn( )
+        help_import( )
+        help_list( )
+        help_clear_list( )
+        help_probe_list( )
+        help_query( )
+        help_schema( )
+        help_apply( )
+        help_factory_reset( )
+        help_identify( )
+        help_flash( )
+        help_print_sample( )
+        help_replace( )
+    else:
+        try:
+            eval( 'help_' + what[0].replace('-','_') + '()' )
+        except:
+            print( "No help for " + what[0] )
+            print( "Try: help operations, or one of " + ', '.join( all_operations ) )
 
 def compatibility( ):
     global url_read, http_post, urlquote, stringtofile, deep_update
@@ -2183,7 +2206,7 @@ def validate_options( vars ):
          else:
              allow[ r ] = require[ r ]
 
-    for z in [ v for v in vars if vars[ v ] and v not in ( 'access', 'operation', 'ddwrt_file', 'pause_time', 'ota_timeout', 'device_db', 'prefix', 'device_queue', 'verbose' ) ]:
+    for z in [ v for v in vars if vars[ v ] and v not in ( 'what', 'access', 'operation', 'ddwrt_file', 'pause_time', 'ota_timeout', 'device_db', 'prefix', 'device_queue', 'verbose' ) ]:
         if z not in allow[ op ]:
             incompatible.append( z.replace( "_", "-" ) )
     if len( incompatible ) > 1:
@@ -2247,12 +2270,11 @@ def main():
     p.add_argument(       '--dry-run', action='store_true', help='Display urls to apply instead of performing --restore or --settings' )
     p.add_argument(       '--settings', help='Comma separated list of name=value settings for use with provision operation' )
     p.add_argument( metavar='OPERATION',
-                    help='help|features|provision|provision-list|factory-reset|flash|import|' + \
-                         'ddwrt-learn|list|clear-list|print-sample|probe-list|query|' + \
-                         'apply|schema|identify|replace',
+                    help='|'.join(all_operations),
                     dest="operation", 
-                    choices=('help','features','provision-list','provision','factory-reset','flash','import', 'ddwrt-learn','list',
-                             'clear-list','print-sample','probe-list', 'query', 'apply', 'schema', 'identify', 'replace' ) )
+                    choices=all_operations )
+
+    p.add_argument( dest='what', default=None, nargs='*' )
 
     try:
         args = p.parse_args( )
@@ -2274,7 +2296,7 @@ def main():
             args.access = 'Continuous'
 
     if args.operation == 'help':
-        help_docs( )
+        help_docs( args.what )
         return
 
     if args.operation == 'features':
