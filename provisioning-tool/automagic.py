@@ -47,7 +47,6 @@
 ######################################################################################################################
 #
 #  TODO:
-#            apply work correctly with --access=Periodic|ALL
 #            Check Shelly firmware version (for LATEST)
 #            OTA update settings/status after complete (or fix this)
 #
@@ -114,7 +113,7 @@ else:
     from StringIO import StringIO
     from urllib2 import HTTPError
 
-version = "1.0005"
+version = "1.0006"
 
 required_keys = [ 'SSID', 'Password' ]
 optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName', 'LatLng', 'TZ', 'Access' ]
@@ -1473,7 +1472,7 @@ def apply( args, new_version, data, need_write ):
     if args.apply_urls:
         for url in args.apply_urls:
             if args.dry_run:
-                print( 'http://' + data[ 'IP' ] + url, 'to apply ' + url )
+                print( 'http://' + data[ 'IP' ] + url )
             else:
                 got = get_url( data[ 'IP' ], args.pause_time, args.verbose, 'http://' + data[ 'IP' ] + url, 'to apply ' + url )
                 if not args.settings:
@@ -1566,7 +1565,7 @@ def short_heading( c ):
 
 def find_device( dev ):
     try:
-        attempt = url_read( 'http://' + dev[ 'ProbeIP' ] + '/ota', tmout = 0.5 )
+        attempt = url_read( 'http://' + dev[ 'IP' ] + '/ota', tmout = 0.5 )
     except:
         attempt = None
     if attempt: return True
@@ -1631,6 +1630,8 @@ def query( args, new_version = None ):
     results.sort( key=lambda x: x[0][k], reverse=False )
     todo = []
     nogo = []
+    continuous_count = 0
+    total_count = 0
     for ( res, data ) in results:
         if match_rec( data, query_conditions, args.match_tag, args.group, args.restore_device, args.access ):
             if args.set_tag or args.delete_tag:
@@ -1640,7 +1641,7 @@ def query( args, new_version = None ):
                     data[ 'Tags' ] = ','.join( set( old_tags ).union( [ args.set_tag ] ) )
                 if args.delete_tag:
                     data[ 'Tags' ] = ','.join( set( old_tags ).difference( [ args.delete_tag ] ) )
-                device_db[ data['ID'] ][ 'Tags' ] = data[ 'Tags' ]
+                device_db[ data[ 'ID' ] ][ 'Tags' ] = data[ 'Tags' ]
             result = ""
             for c in query_columns:
                 hc = c if args.verbose > 0 else short_heading( c )
@@ -1649,7 +1650,10 @@ def query( args, new_version = None ):
             if 'IP' not in data:
                 nogo.append( [ result, res, data ] )
             else:
+                if 'Access' not in data or data[ 'Access' ] == 'Continuous':
+                    continuous_count += 1
                 todo.append( [ result, res, data ] )
+                total_count += 1
 
     for (result, res, data) in todo:
          print( result )
@@ -1662,17 +1666,37 @@ def query( args, new_version = None ):
                 print( data[ 'ID' ] )
             print( )
 
-        if todo:
+        if todo and not args.dry_run:
             print( "Applying changes..." )
 
         done = []
+        passes = 0
         while( todo ):
-            for (result, res, data) in todo:
+            passes += 1
+            for ( result, res, data ) in todo:
                 if find_device( data ):
                     done.append( [ result, res, data ] )
-                    print( data[ 'IP' ] )
+                    if not args.dry_run: print( data[ 'IP' ] )
                     ( configured_settings, need_write ) = apply( args, new_version, data, need_write )
+                    total_count -= 1
+                    if 'Access' not in data or data[ 'Access' ] == 'Continuous':
+                        continuous_count -= 1
+                        
+                        if continuous_count == 0 and total_count > 0:
+                           print( )
+                           print( "Only Periodic WiFi-connected devices remain. Polling until they are found..." )
+
             todo = [ r for r in todo if r not in done ]
+
+            if passes > 10 and continuous_count == total_count:
+                 print( )
+                 print( "These device could not be contacted:" )
+                 for ( result, res, data ) in todo:
+                    print( data[ 'IP' ] )
+                 break
+
+            if todo:
+                time.sleep(.5)
 
         if configured_settings:
             device_db[ data[ 'ID' ] ][ 'settings' ] = configured_settings
