@@ -24,6 +24,8 @@
 #
 #  Changes:
 #
+# 1.0006     
+#
 # 1.0005     Added --access ALL|Periodic|Continuous features for probe-list and apply to work with
 #            battery-powered devices with periodic WiFi access
 #
@@ -145,6 +147,10 @@ device_db = None
 device_queue = None
 factory_device_addr = "192.168.33.1"
 labelprinting = None
+
+####################################################################################
+#   Help subsystem
+####################################################################################
 
 def help_features( ):
     print(dedent(""" 
@@ -671,6 +677,49 @@ def help_docs( what ):
             print( "No help for " + what[0] )
             print( "Try: help operations, or one of " + ', '.join( all_operations ) )
 
+####################################################################################
+#   Python 2/3 compatibility functions
+####################################################################################
+
+def v2_url_read( s, mode = 't', tmout = 2 ):
+    if mode == 'b':
+        return urllib2.urlopen( s, timeout = tmout ).read( )
+    return urllib2.urlopen( s, timeout = tmout ).read( ).decode( 'utf8' )
+
+def v3_url_read( s, mode = 't', tmout = 2 ):
+    return urllib.request.urlopen( s, timeout = tmout ).read( )
+
+def v2_http_post( url, data, username, password, referrer ):
+    post = url_encode( data )
+    req = urllib2.Request( url, post )
+    base64string = base64.b64encode( '%s:%s' % ( username, password ) )
+    req.add_header( "Authorization", "Basic %s" % base64string )
+    req.add_header( 'Referer', referrer )
+    response = urllib2.urlopen( req )
+    return response.read( )
+
+def v3_http_post( url, data, username, password, referrer ):
+    return( requests.post( url, data = data, auth = ( username, password ), headers = { 'Referer' : referrer } ) )
+
+def v2_deep_update(d, u):
+    for k, v in u.iteritems():
+        if isinstance(v, collections.Mapping):
+            d[k] = v2_deep_update(d.get(k, {}), v)
+        else:
+            d[k] = v
+    return d
+
+def v3_deep_update(d, u):
+    for k, v in u.items():
+        if isinstance(v, collections.abc.Mapping):
+            d[k] = v3_deep_update(d.get(k, {}), v)
+        else:
+            d[k] = v
+    return d
+
+def noop( a = "" ):
+    return( a )
+
 def compatibility( ):
     global url_read, http_post, urlquote, stringtofile, deep_update
 
@@ -687,14 +736,351 @@ def compatibility( ):
         urlquote = urllib.quote_plus
         stringtofile = StringIO
 
-def url_encode( vals ):
-    if type( vals ) == type( { } ):
-        return urlencode( dict( [ [ v, vals[ v ] if vals[ v ] != None else '' ] for v in vals ] ) ).replace( 'urls%5B%5D', 'urls[]' )
-    else:
-        return urlencode( [ ( n, v ) if v != None else ( n, '' ) for ( n, v ) in vals ] ).replace( 'urls%5B%5D', 'urls[]' )
+####################################################################################
+#   PC compatibility functions
+####################################################################################
 
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
+def pc_write_profile( ssid, path ):
+    f = open( path, "w" )
+    f.write( """<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+        <name>""" + ssid + """</name>
+	<SSIDConfig>
+		<SSID>
+                        <hex>""" + str(binascii.b2a_hex(ssid.encode("utf-8")).decode()) + """</hex>
+                        <name>""" + ssid + """</name>
+		</SSID>
+	</SSIDConfig>
+	<connectionMode>manual</connectionMode>
+	<MSM>
+		<security>
+			<authEncryption>
+				<authentication>open</authentication>
+				<encryption>none</encryption>
+				<useOneX>false</useOneX>
+			</authEncryption>
+		</security>
+	</MSM>
+	<MacRandomization xmlns="http://www.microsoft.com/networking/WLAN/profile/v3">
+		<enableRandomization>false</enableRandomization>
+	</MacRandomization>
+</WLANProfile>""")
+    f.close()
+
+def pc_get_cmd_output(cmd, key, err):
+    output = subprocess.check_output( cmd, shell=True ).decode( 'utf8' )
+    m = re.search( key + ' *:  *(.*)', output )
+    if not m:
+         eprint( err )
+         sys.exit()
+    return m.group(1).rstrip()
+
+def pc_get_cred():
+    ssid = pc_get_cmd_output( 'cmd /c "netsh wlan show interfaces | findstr SSID"', 'SSID', "Could not identify current SSID" )
+    profile = pc_get_cmd_output( 'cmd /c "netsh wlan show interfaces | findstr Profile"', 'Profile', "Could not identify current Profile" )
+    pw = pc_get_cmd_output( 'cmd /c "netsh wlan show profile name=' + ssid + ' key=clear | findstr Key"', 'Key Content', "Could not determine pasword for network " + ssid )
+    return { 'profile' : ssid, 'ssid' : ssid, 'password' : pw }
+
+def pc_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
+    if prefix:
+        # it's necessary to disconnect in order to have wlan show networks show all networks
+        os.system('cmd /c "netsh wlan disconnect"')
+        show_networks = subprocess.check_output( 'cmd /c "netsh wlan show networks"', shell=True ).decode('utf8')
+        network = None
+        networks = re.findall( r'SSID .*', show_networks, re.MULTILINE )
+        if verbose > 1: print(repr(networks))
+        for n in networks:
+            if verbose > 1: print(repr(n))
+            m = re.search( 'SSID  *[0-9][0-9]*  *:  *(' + str + '.*)', n )
+            if m and m.group(1) != '' and m.group(1).rstrip() not in ignore_ssids:
+                network = m.group(1).rstrip()
+                break
+
+        if not network:
+            os.system('cmd /c "netsh wlan connect name=' + credentials['profile'] + '"')
+            return None
+    else:
+        network = str
+
+    pc_write_profile( network, tempfile.gettempdir() + r"\ntwrk_tmp.xml" )
+    os.system('cmd /c "netsh wlan add profile filename=' + tempfile.gettempdir() + r'\ntwrk_tmp.xml user=all"')
+
+    os.system('cmd /c "netsh wlan connect name=' + network + '"')
+    return network
+
+def pc_reconnect( credentials ):
+    os.system('cmd /c "netsh wlan connect name=' + credentials['profile'] + '"')
+    return True
+
+####################################################################################
+#   Mac compatibility functions
+####################################################################################
+
+def mac_init( ):
+    global os_stash
+    import objc
+    
+    objc.loadBundle('CoreWLAN',
+                    bundle_path = '/System/Library/Frameworks/CoreWLAN.framework',
+                    module_globals = globals())
+    
+    os_stash['iface'] = CWInterface.interface()
+
+def mac_get_cred():
+    ssid = os_stash['iface'].ssid()
+    pw = subprocess.check_output( """security find-generic-password -ga """ + ssid + """ 2>&1 1>/dev/null | sed -e 's/password: "//' -e 's/"$//'""", shell=True ).rstrip()
+    if pw == '':
+        print( "Could not get wifi password" )
+        sys.exit()
+    return {'profile' : ssid, 'ssid' : ssid, 'password' : pw.decode("ascii") }
+
+def mac_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
+    passes = 0
+    while passes < 5:
+        for i in range( 3 ):
+            passes += 1
+            if prefix:
+                networks, error = os_stash['iface'].scanForNetworksWithSSID_error_(None, None)
+            else:
+                networks, error = os_stash['iface'].scanForNetworksWithName_error_(str, None)
+            if networks:
+                break
+            time.sleep( 1 )
+    
+        if verbose > 1: print(repr(networks))
+    
+        if not networks:
+            eprint( error )
+            return None
+    
+        found = None
+        
+        for n in networks:
+            if n.ssid() and ( n.ssid().startswith(str) and prefix or n.ssid() == str ) and n.ssid() not in ignore_ssids:
+                found = n
+                break
+
+        if found: break
+
+    if not found:
+        return None
+   
+    if found: 
+        if verbose > 1: print( 'Detected ' + found.ssid() )
+        success, error = os_stash['iface'].associateToNetwork_password_error_(found, password, None)
+        if error:
+             eprint(error)
+             return None
+        return found.ssid()
+    return None
+
+def mac_reconnect( credentials ):
+    return mac_connect( credentials, credentials['ssid'], prefix = False, password = credentials['password'] )
+
+####################################################################################
+#   DD-WRT interactions
+####################################################################################
+
+def ddwrt_do_cmd( tn, cmd, prompt ):
+    tn.read_very_eager()   # throw away any pending junk
+    tn.write(b"echo ${z}BOT${z};(" + cmd.encode('ascii') + b")  2>/tmp/cmd.err.out\n")
+    tn.read_until(b'####BOT####\r\n',2)     ### consume echo
+    response = tn.read_until(prompt,2).decode('ascii')[:-len(prompt)-1]   #remove prompt
+    result = []
+    err = ""
+    for line in response.replace("\r","").split("\n"):
+        result.append( line )
+    tn.write(b"echo ${z}BOT${z};cat /tmp/cmd.err.out\n")
+    tn.read_until(b'####BOT####\r\n',2)     ### consume echo
+    err = tn.read_until(prompt,2).decode('ascii')[:-len(prompt)-1]   #remove prompt
+    return ( result, err )
+
+def ddwrt_get_single_line_result( cn, cmd ):
+    ( result, err ) = ddwrt_do_cmd( cn['conn'], cmd, cn['eot'] )
+    if err != "":
+        raise Exception( err )
+    if len( result ) > 2:
+        raise Exception( 'multi-line response' )
+    return( result[0] )
+
+def ddwrt_sync_connection( cn, btext, tmout ):
+    cn['conn'].write( btext + b"z='####';echo ${z}SYNC${z}\n" )
+    cn['conn'].read_until( b'####SYNC####\r\n', tmout )
+    cn['conn'].read_until( cn['eot'], tmout )
+
+def ddwrt_establish_connection( address, user, password, eot ):
+    tn = telnetlib.Telnet( address )
+    tn.read_until( b"login: " )
+    tn.write( user.encode( 'ascii' ) + b"\n")
+    if password:
+        tn.read_until( b"Password: " )
+        tn.write( password.encode( 'ascii' ) + b"\n" )
+    cn = { 'conn' : tn, 'eot' : eot }
+    ddwrt_sync_connection( cn, b"PS1="+eot+b"\\\\n;", 20 )
+    return cn
+
+def ddwrt_connect_to_known_router( ddwrt_name ):
+    if ddwrt_name not in router_db:
+        print( 'dd-wrt device ' + ddwrt_name + ' not found. Use ddwrt-learn, or choose another device that is already known.' )
+        sys.exit()
+    router = router_db[ ddwrt_name ]
+    cn = ddwrt_establish_connection( router[ 'address' ], 'root', router[ 'password' ], b'#EOT#' )
+    cn[ 'router' ] = router
+    et0macaddr = ddwrt_get_single_line_result( cn, "nvram get et0macaddr" )
+    if et0macaddr != router[ 'et0macaddr' ]:
+        print( 'device currently at ip address ' + router[ 'address' ] + ' is not ' + ddwrt_name )
+        sys.exit( )
+    cn[ 'current_mode' ] = ddwrt_get_single_line_result( cn, "nvram get wl_mode" )
+    return cn
+
+def ddwrt_apply( address, user, password ):
+    data = { 'submit_button':'index', 'action':'ApplyTake' }
+    http_post( 'http://' + address + '/apply.cgi', data, user, password, 'http://' + address + '/Management.asp' )
+
+def ddwrt_program_mode( cn, pgm, from_db, deletes=None ):
+    for k in pgm.keys():
+        ddwrt_get_single_line_result( cn, "nvram set " + k + '=' + pgm[k] )
+    mode = pgm[ 'wl_mode' ]
+    for k in from_db:
+        ddwrt_get_single_line_result( cn, "nvram set " + k + '=' + cn[ 'router' ][ mode ][ k ] )
+    if deletes:
+        for k in deletes:
+            ddwrt_get_single_line_result( cn, "nvram unset " + k )
+    ddwrt_get_single_line_result( cn, "nvram commit 2>/dev/null" )
+    if cn[ 'current_mode' ] == mode:
+        ddwrt_get_single_line_result( cn, "stopservice nas;stopservice wlconf 2>/dev/null;startservice wlconf 2>/dev/null;startservice nas" )
+    else:
+        cn[ 'current_mode' ] = mode
+        ddwrt_apply( cn[ 'router' ][ 'address' ], 'admin', cn[ 'router' ][ 'password' ] )
+        print( "changing dd-wrt modes... configuration sent, now waiting for dd-wrt to apply changes" )
+        time.sleep( 5 )
+        ddwrt_sync_connection( cn, b'', 20 )
+        ddwrt_get_single_line_result( cn, "wl radio off; wl radio on" )
+
+def ddwrt_set_ap_mode( cn, ssid, password ):
+    pgm = { 'pptp_use_dhcp' : '1',        'wan_gateway' : '0.0.0.0',         'wan_ipaddr' : '0.0.0.0',               
+            'wan_netmask' : '0.0.0.0',    'wan_proto' : 'disabled',          'wl0_akm' : 'psk psk2',                 
+            'wl0_mode' : 'ap',            'wl0_nctrlsb' : 'none',            'wl0_security_mode' : 'psk psk2',       
+            'wl0_ssid' : ssid,            'wl_ssid' : ssid,                  'wl0_wpa_psk' : password,               
+            'wl_mode' : 'ap',             'dns_redirect' : '1',              'dnsmasq_enable' : '0'                  
+          } 
+    from_db = [ 'wl0_hw_rxchain','wl0_hw_txchain','wan_hwaddr' ]
+    deletes = [ 'wan_ipaddr_buf','wan_ipaddr_static','wan_netmask_static', 'wl0_vifs' ]
+    ddwrt_program_mode( cn, pgm, from_db, deletes )
+
+def ddwrt_set_sta_mode( cn, ssid ):
+    pgm = { 'pptp_use_dhcp' : '0',        'wan_gateway' : '192.168.33.1',    'wan_ipaddr' : '192.168.33.10',                     
+            'wan_ipaddr_static' : '..',   'wan_netmask' : '255.255.255.0',   'wan_netmask_static' : '..',                     
+            'wan_proto' : 'static',       'wl0_akm' : 'disabled',            'wl0_mode' : 'sta',                     
+            'wl0_nctrlsb' : '',           'wl0_security_mode' : 'disabled',  'wl0_vifs' : '',                     
+            'wl_mode' : 'sta',            'wl0_ssid' : ssid,                 'wl_ssid' :  ssid,                     
+            'dns_redirect' : '1',         'dnsmasq_enable' : '0',            'wan_ipaddr_buf' : '192.168.33.10',          
+          }
+    from_db = [ 'sta_ifname','wl0_hw_rxchain','wl0_hw_txchain','wan_hwaddr' ]
+    deletes = [ 'wl0_wpa_psk' ]
+    ddwrt_program_mode( cn, pgm, from_db, deletes )
+
+def ddwrt_learn( ddwrt_name, ddwrt_address, ddwrt_password, ddwrt_file ):
+    global router_db
+    cn = ddwrt_establish_connection( ddwrt_address, "root", ddwrt_password, b'#EOT#' )
+    ddwrt_info = { }
+    et0macaddr = ddwrt_get_single_line_result( cn, "nvram get et0macaddr" )
+    for term in ( 'sta_ifname', 'wan_hwaddr', 'wl0_mode', 'wl0_hw_txchain', 'wl0_hw_rxchain' ):
+        result = ddwrt_get_single_line_result( cn, "nvram get "+term )
+        ddwrt_info[term] = result
+
+    if ddwrt_name in router_db:
+        old_info = router_db[ ddwrt_name ]
+        if old_info[ 'et0macaddr' ] != et0macaddr:
+            print( 'Name ' + ddwrt_name + ' is already used for another device: ' + old_info[ 'et0macaddr' ] )
+            print( 'Choose a different name and try again.' )
+            sys.exit()
+        print( "updating info for " + ddwrt_name )
+        old_info[ ddwrt_info[ 'wl0_mode' ] ] = ddwrt_info
+        router_db[ ddwrt_name ] = old_info
+    else:
+        router_db[ ddwrt_name ] = { "name" : ddwrt_name, "address" : ddwrt_address, "password" : ddwrt_password ,
+                                    "et0macaddr" : et0macaddr, ddwrt_info[ "wl0_mode" ] : ddwrt_info  }
+    router_db[ ddwrt_name ][ 'InsertTime' ] = time.time()
+    write_json_file( ddwrt_file, router_db )
+    print( ddwrt_info[ 'wl0_mode' ] + ' mode learned' )
+    if 'ap' not in router_db[ ddwrt_name ]:
+        print( 'ap mode has not been detected yet for this ddwrt device. To use it for verification step, configure ap mode and re-learn' )
+    elif 'sta' not in router_db[ ddwrt_name ]:
+        print( 'sta mode has not been detected yet for this ddwrt device. To use it for configuration step, configure client mode with static wan address 192.168.33.10 and re-learn' )
+    else:
+        print( 'Device is now fully learned, ready for configuration and verification of target' )
+
+def ddwrt_choose_roles( ddwrt_name ):
+    nodes = []
+    ap_node = 0
+    sta_node = len( ddwrt_name ) - 1
+    for node in ddwrt_name:
+        nodes.append( ddwrt_connect_to_known_router( node ) )
+    ap_capable = []
+    sta_capable = []
+    current_ap = []
+    current_sta = []
+    for i in range( len(nodes) ):
+        if 'ap' in nodes[i]['router']: ap_capable.append( i )
+        if 'sta' in nodes[i]['router']: sta_capable.append( i )
+        if 'ap' == nodes[i]['current_mode']: current_ap.append( i )
+        if 'sta' == nodes[i]['current_mode']: current_sta.append( i )
+    if len( ap_capable ) == 0:
+        print( "No AP capable dd-wrt device found. Re-learn the device with it set in AP mode" )
+        sys.exit()
+    if len( sta_capable ) == 0:
+        print( "No client-mode capable dd-wrt device found. Re-learn the device with it set in client mode" )
+        sys.exit()
+    if len( nodes ) > 1:
+        if len( ap_capable ) < 2:
+            ap_node = ap_capable[0]
+            sta_node = ( ap_node + 1 ) % 2
+        elif len( sta_capable ) < 2:
+            sta_node = sta_capable[0]
+            ap_node = ( sta_node + 1 ) % 2
+        elif len( current_ap ) < 2:
+            ap_node = current_ap[0]
+            sta_node = ( ap_node + 1 ) % 2
+        elif len( current_sta ) < 2:
+            sta_node = sta_capable[0]
+            ap_node = ( sta_node + 1 ) % 2
+    return( nodes[ ap_node ], nodes[ sta_node ] )
+
+def ddwrt_discover( cn, prefix ):
+    cmd = "site_survey 2>&1"
+    ( result, err ) = ddwrt_do_cmd( cn['conn'], cmd, cn['eot'] )
+    if not result and err != '':
+        eprint( err )
+        sys.exit( )
+    ret = []
+    for n in range( 1, len( result ) ):
+        r = re.sub( r'.*SSID\[ *(.*)\] BSSID\[.*', r'\1', result[ n ] )
+        if r.startswith( prefix ):
+            ret.append( r )
+    return ret
+
+def ddwrt_wget( cn, url, verbose, msg, tries = 1 ):
+    passes = 0
+    if msg:
+        sys.stdout.write( msg )
+    if verbose > 0:
+        print( url )
+    while True:
+        passes += 1
+        if msg:
+            sys.stdout.write( "." )
+            sys.stdout.flush( )
+        ( result, err ) = ddwrt_do_cmd( cn['conn'], "wget -T 1 -qO- '" + url + "'; echo", cn['eot'] )
+        if ( len(result) > 1 or result[0] != '' ) or passes > tries:
+            break
+        time.sleep( 2 )
+    if msg: print( )
+    return ( result, err )
+
+####################################################################################
+#   Label interface
+####################################################################################
 
 def import_label_lib( print_using ):
     global labelprinting
@@ -773,326 +1159,15 @@ def test_print( ):
         }
     print_label( dev_info )
 
-def read_json_file( f, empty, validate = False ):
-    valid = True
-    try:
-        with open( f, 'r' ) as openfile:
-            result = json.load( openfile )
-            if validate:
-                if type( empty ) != type( result ):
-                    valid = False
-                elif type( result ) == type( {} ):
-                    if 'format' not in result or result[ 'format' ] != 'automagic':
-                        valid = False
-                elif type( result ) == type( [] ) and len( result ) >= 1:
-                    valid = False
-                    for v in validate:
-                        if v in result[0]:
-                            valid = True
-            if not valid:
-                print( "File " + f + " was not written by this program, or is corrupt." )
-                sys.exit()
-            return result
-    except IOError as e:
-        if empty == 'fail':
-            print( e )
-            sys.exit( )
-        return empty
+####################################################################################
+#   HTTP Utilities
+####################################################################################
 
-def write_json_file( f, j ):
-    try:
-        with open( f, "w" ) as outfile:
-            outfile.write( json.dumps( j, indent = 4 ) )
-    except IOError as e:
-        print( e )
-        sys.exit( )
-
-def do_cmd( tn, cmd, prompt ):
-    tn.read_very_eager()   # throw away any pending junk
-    tn.write(b"echo ${z}BOT${z};(" + cmd.encode('ascii') + b")  2>/tmp/cmd.err.out\n")
-    tn.read_until(b'####BOT####\r\n',2)     ### consume echo
-    response = tn.read_until(prompt,2).decode('ascii')[:-len(prompt)-1]   #remove prompt
-    result = []
-    err = ""
-    for line in response.replace("\r","").split("\n"):
-        result.append( line )
-    tn.write(b"echo ${z}BOT${z};cat /tmp/cmd.err.out\n")
-    tn.read_until(b'####BOT####\r\n',2)     ### consume echo
-    err = tn.read_until(prompt,2).decode('ascii')[:-len(prompt)-1]   #remove prompt
-    return ( result, err )
-
-def get_single_line_result( cn, cmd ):
-    ( result, err ) = do_cmd( cn['conn'], cmd, cn['eot'] )
-    if err != "":
-        raise Exception( err )
-    if len( result ) > 2:
-        raise Exception( 'multi-line response' )
-    return( result[0] )
-
-def sync_connection( cn, btext, tmout ):
-    cn['conn'].write( btext + b"z='####';echo ${z}SYNC${z}\n" )
-    cn['conn'].read_until( b'####SYNC####\r\n', tmout )
-    cn['conn'].read_until( cn['eot'], tmout )
-
-def establish_connection( address, user, password, eot ):
-    tn = telnetlib.Telnet( address )
-    tn.read_until( b"login: " )
-    tn.write( user.encode( 'ascii' ) + b"\n")
-    if password:
-        tn.read_until( b"Password: " )
-        tn.write( password.encode( 'ascii' ) + b"\n" )
-    cn = { 'conn' : tn, 'eot' : eot }
-    sync_connection( cn, b"PS1="+eot+b"\\\\n;", 20 )
-    return cn
-
-def connect_to_known_router( ddwrt_name ):
-    if ddwrt_name not in router_db:
-        print( 'dd-wrt device ' + ddwrt_name + ' not found. Use ddwrt-learn, or choose another device that is already known.' )
-        sys.exit()
-    router = router_db[ ddwrt_name ]
-    cn = establish_connection( router[ 'address' ], 'root', router[ 'password' ], b'#EOT#' )
-    cn[ 'router' ] = router
-    et0macaddr = get_single_line_result( cn, "nvram get et0macaddr" )
-    if et0macaddr != router[ 'et0macaddr' ]:
-        print( 'device currently at ip address ' + router[ 'address' ] + ' is not ' + ddwrt_name )
-        sys.exit( )
-    cn[ 'current_mode' ] = get_single_line_result( cn, "nvram get wl_mode" )
-    return cn
-
-def ddwrt_apply( address, user, password ):
-    data = { 'submit_button':'index', 'action':'ApplyTake' }
-    http_post( 'http://' + address + '/apply.cgi', data, user, password, 'http://' + address + '/Management.asp' )
-
-def program_mode( cn, pgm, from_db, deletes=None ):
-    for k in pgm.keys():
-        get_single_line_result( cn, "nvram set " + k + '=' + pgm[k] )
-    mode = pgm[ 'wl_mode' ]
-    for k in from_db:
-        get_single_line_result( cn, "nvram set " + k + '=' + cn[ 'router' ][ mode ][ k ] )
-    if deletes:
-        for k in deletes:
-            get_single_line_result( cn, "nvram unset " + k )
-    get_single_line_result( cn, "nvram commit 2>/dev/null" )
-    if cn[ 'current_mode' ] == mode:
-        get_single_line_result( cn, "stopservice nas;stopservice wlconf 2>/dev/null;startservice wlconf 2>/dev/null;startservice nas" )
+def url_encode( vals ):
+    if type( vals ) == type( { } ):
+        return urlencode( dict( [ [ v, vals[ v ] if vals[ v ] != None else '' ] for v in vals ] ) ).replace( 'urls%5B%5D', 'urls[]' )
     else:
-        cn[ 'current_mode' ] = mode
-        ddwrt_apply( cn[ 'router' ][ 'address' ], 'admin', cn[ 'router' ][ 'password' ] )
-        print( "changing dd-wrt modes... configuration sent, now waiting for dd-wrt to apply changes" )
-        time.sleep( 5 )
-        sync_connection( cn, b'', 20 )
-        get_single_line_result( cn, "wl radio off; wl radio on" )
-
-def set_ap_mode( cn, ssid, password ):
-    pgm = { 'pptp_use_dhcp' : '1',        'wan_gateway' : '0.0.0.0',         'wan_ipaddr' : '0.0.0.0',               
-            'wan_netmask' : '0.0.0.0',    'wan_proto' : 'disabled',          'wl0_akm' : 'psk psk2',                 
-            'wl0_mode' : 'ap',            'wl0_nctrlsb' : 'none',            'wl0_security_mode' : 'psk psk2',       
-            'wl0_ssid' : ssid,            'wl_ssid' : ssid,                  'wl0_wpa_psk' : password,               
-            'wl_mode' : 'ap',             'dns_redirect' : '1',              'dnsmasq_enable' : '0'                  
-          } 
-    from_db = [ 'wl0_hw_rxchain','wl0_hw_txchain','wan_hwaddr' ]
-    deletes = [ 'wan_ipaddr_buf','wan_ipaddr_static','wan_netmask_static', 'wl0_vifs' ]
-    program_mode( cn, pgm, from_db, deletes )
-
-def set_sta_mode( cn, ssid ):
-    pgm = { 'pptp_use_dhcp' : '0',        'wan_gateway' : '192.168.33.1',    'wan_ipaddr' : '192.168.33.10',                     
-            'wan_ipaddr_static' : '..',   'wan_netmask' : '255.255.255.0',   'wan_netmask_static' : '..',                     
-            'wan_proto' : 'static',       'wl0_akm' : 'disabled',            'wl0_mode' : 'sta',                     
-            'wl0_nctrlsb' : '',           'wl0_security_mode' : 'disabled',  'wl0_vifs' : '',                     
-            'wl_mode' : 'sta',            'wl0_ssid' : ssid,                 'wl_ssid' :  ssid,                     
-            'dns_redirect' : '1',         'dnsmasq_enable' : '0',            'wan_ipaddr_buf' : '192.168.33.10',          
-          }
-    from_db = [ 'sta_ifname','wl0_hw_rxchain','wl0_hw_txchain','wan_hwaddr' ]
-    deletes = [ 'wl0_wpa_psk' ]
-    program_mode( cn, pgm, from_db, deletes )
-
-def ddwrt_learn( ddwrt_name, ddwrt_address, ddwrt_password, ddwrt_file ):
-    global router_db
-    cn = establish_connection( ddwrt_address, "root", ddwrt_password, b'#EOT#' )
-    ddwrt_info = { }
-    et0macaddr = get_single_line_result( cn, "nvram get et0macaddr" )
-    for term in ( 'sta_ifname', 'wan_hwaddr', 'wl0_mode', 'wl0_hw_txchain', 'wl0_hw_rxchain' ):
-        result = get_single_line_result( cn, "nvram get "+term )
-        ddwrt_info[term] = result
-
-    if ddwrt_name in router_db:
-        old_info = router_db[ ddwrt_name ]
-        if old_info[ 'et0macaddr' ] != et0macaddr:
-            print( 'Name ' + ddwrt_name + ' is already used for another device: ' + old_info[ 'et0macaddr' ] )
-            print( 'Choose a different name and try again.' )
-            sys.exit()
-        print( "updating info for " + ddwrt_name )
-        old_info[ ddwrt_info[ 'wl0_mode' ] ] = ddwrt_info
-        router_db[ ddwrt_name ] = old_info
-    else:
-        router_db[ ddwrt_name ] = { "name" : ddwrt_name, "address" : ddwrt_address, "password" : ddwrt_password ,
-                                    "et0macaddr" : et0macaddr, ddwrt_info[ "wl0_mode" ] : ddwrt_info  }
-    router_db[ ddwrt_name ][ 'InsertTime' ] = time.time()
-    write_json_file( ddwrt_file, router_db )
-    print( ddwrt_info[ 'wl0_mode' ] + ' mode learned' )
-    if 'ap' not in router_db[ ddwrt_name ]:
-        print( 'ap mode has not been detected yet for this ddwrt device. To use it for verification step, configure ap mode and re-learn' )
-    elif 'sta' not in router_db[ ddwrt_name ]:
-        print( 'sta mode has not been detected yet for this ddwrt device. To use it for configuration step, configure client mode with static wan address 192.168.33.10 and re-learn' )
-    else:
-        print( 'Device is now fully learned, ready for configuration and verification of target' )
-
-def noop( a = "" ):
-    return( a )
-
-def v2_url_read( s, mode = 't', tmout = 2 ):
-    if mode == 'b':
-        return urllib2.urlopen( s, timeout = tmout ).read( )
-    return urllib2.urlopen( s, timeout = tmout ).read( ).decode( 'utf8' )
-
-def v3_url_read( s, mode = 't', tmout = 2 ):
-    return urllib.request.urlopen( s, timeout = tmout ).read( )
-
-def v2_http_post( url, data, username, password, referrer ):
-    post = url_encode( data )
-    req = urllib2.Request( url, post )
-    base64string = base64.b64encode( '%s:%s' % ( username, password ) )
-    req.add_header( "Authorization", "Basic %s" % base64string )
-    req.add_header( 'Referer', referrer )
-    response = urllib2.urlopen( req )
-    return response.read( )
-
-def v3_http_post( url, data, username, password, referrer ):
-    return( requests.post( url, data = data, auth = ( username, password ), headers = { 'Referer' : referrer } ) )
-
-def pc_write_profile( ssid, path ):
-    f = open( path, "w" )
-    f.write( """<?xml version="1.0"?>
-<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
-        <name>""" + ssid + """</name>
-	<SSIDConfig>
-		<SSID>
-                        <hex>""" + str(binascii.b2a_hex(ssid.encode("utf-8")).decode()) + """</hex>
-                        <name>""" + ssid + """</name>
-		</SSID>
-	</SSIDConfig>
-	<connectionType>ESS</connectionType>
-	<connectionMode>manual</connectionMode>
-	<MSM>
-		<security>
-			<authEncryption>
-				<authentication>open</authentication>
-				<encryption>none</encryption>
-				<useOneX>false</useOneX>
-			</authEncryption>
-		</security>
-	</MSM>
-	<MacRandomization xmlns="http://www.microsoft.com/networking/WLAN/profile/v3">
-		<enableRandomization>false</enableRandomization>
-	</MacRandomization>
-</WLANProfile>""")
-    f.close()
-
-def pc_get_cmd_output(cmd, key, err):
-    output = subprocess.check_output( cmd, shell=True ).decode( 'utf8' )
-    m = re.search( key + ' *:  *(.*)', output )
-    if not m:
-         eprint( err )
-         sys.exit()
-    return m.group(1).rstrip()
-
-def pc_get_cred():
-    ssid = pc_get_cmd_output( 'cmd /c "netsh wlan show interfaces | findstr SSID"', 'SSID', "Could not identify current SSID" )
-    profile = pc_get_cmd_output( 'cmd /c "netsh wlan show interfaces | findstr Profile"', 'Profile', "Could not identify current Profile" )
-    pw = pc_get_cmd_output( 'cmd /c "netsh wlan show profile name=' + ssid + ' key=clear | findstr Key"', 'Key Content', "Could not determine pasword for network " + ssid )
-    return { 'profile' : ssid, 'ssid' : ssid, 'password' : pw }
-
-def pc_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
-    if prefix:
-        # it's necessary to disconnect in order to have wlan show networks show all networks
-        os.system('cmd /c "netsh wlan disconnect"')
-        show_networks = subprocess.check_output( 'cmd /c "netsh wlan show networks"', shell=True ).decode('utf8')
-        network = None
-        networks = re.findall( r'SSID .*', show_networks, re.MULTILINE )
-        if verbose > 1: print(repr(networks))
-        for n in networks:
-            if verbose > 1: print(repr(n))
-            m = re.search( 'SSID  *[0-9][0-9]*  *:  *(' + str + '.*)', n )
-            if m and m.group(1) != '' and m.group(1).rstrip() not in ignore_ssids:
-                network = m.group(1).rstrip()
-                break
-
-        if not network:
-            os.system('cmd /c "netsh wlan connect name=' + credentials['profile'] + '"')
-            return None
-    else:
-        network = str
-
-    pc_write_profile( network, tempfile.gettempdir() + r"\ntwrk_tmp.xml" )
-    os.system('cmd /c "netsh wlan add profile filename=' + tempfile.gettempdir() + r'\ntwrk_tmp.xml user=all"')
-
-    os.system('cmd /c "netsh wlan connect name=' + network + '"')
-    return network
-
-def pc_reconnect( credentials ):
-    os.system('cmd /c "netsh wlan connect name=' + credentials['profile'] + '"')
-    return True
-
-def mac_init( ):
-    global os_stash
-    import objc
-    
-    objc.loadBundle('CoreWLAN',
-                    bundle_path = '/System/Library/Frameworks/CoreWLAN.framework',
-                    module_globals = globals())
-    
-    os_stash['iface'] = CWInterface.interface()
-
-def mac_get_cred():
-    ssid = os_stash['iface'].ssid()
-    pw = subprocess.check_output( """security find-generic-password -ga """ + ssid + """ 2>&1 1>/dev/null | sed -e 's/password: "//' -e 's/"$//'""", shell=True ).rstrip()
-    if pw == '':
-        print( "Could not get wifi password" )
-        sys.exit()
-    return {'profile' : ssid, 'ssid' : ssid, 'password' : pw.decode("ascii") }
-
-def mac_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
-    passes = 0
-    while passes < 5:
-        for i in range( 3 ):
-            passes += 1
-            if prefix:
-                networks, error = os_stash['iface'].scanForNetworksWithSSID_error_(None, None)
-            else:
-                networks, error = os_stash['iface'].scanForNetworksWithName_error_(str, None)
-            if networks:
-                break
-            time.sleep( 1 )
-    
-        if verbose > 1: print(repr(networks))
-    
-        if not networks:
-            eprint( error )
-            return None
-    
-        found = None
-        
-        for n in networks:
-            if n.ssid() and ( n.ssid().startswith(str) and prefix or n.ssid() == str ) and n.ssid() not in ignore_ssids:
-                found = n
-                break
-
-        if found: break
-
-    if not found:
-        return None
-   
-    if found: 
-        if verbose > 1: print( 'Detected ' + found.ssid() )
-        success, error = os_stash['iface'].associateToNetwork_password_error_(found, password, None)
-        if error:
-             eprint(error)
-             return None
-        return found.ssid()
-    return None
-
-def mac_reconnect( credentials ):
-    return mac_connect( credentials, credentials['ssid'], prefix = False, password = credentials['password'] )
+        return urlencode( [ ( n, v ) if v != None else ( n, '' ) for ( n, v ) in vals ] ).replace( 'urls%5B%5D', 'urls[]' )
 
 def get_url( addr, tm, verbose, url, operation, tmout = 2 ):
     for i in range( 5 ):
@@ -1128,6 +1203,48 @@ def set_settings_url( address, ssid, pw, static_ip, ip_mask, gateway ):
     else:
         return "http://" + address + "/settings/sta/?enabled=1&ssid=" + urlquote(ssid) + "&key=" + urlquote(pw) + "&ipv4_method=dhcp"
 
+####################################################################################
+#   JSON Utilities
+####################################################################################
+
+def read_json_file( f, empty, validate = False ):
+    valid = True
+    try:
+        with open( f, 'r' ) as openfile:
+            result = json.load( openfile )
+            if validate:
+                if type( empty ) != type( result ):
+                    valid = False
+                elif type( result ) == type( {} ):
+                    if 'format' not in result or result[ 'format' ] != 'automagic':
+                        valid = False
+                elif type( result ) == type( [] ) and len( result ) >= 1:
+                    valid = False
+                    for v in validate:
+                        if v in result[0]:
+                            valid = True
+            if not valid:
+                print( "File " + f + " was not written by this program, or is corrupt." )
+                sys.exit()
+            return result
+    except IOError as e:
+        if empty == 'fail':
+            print( e )
+            sys.exit( )
+        return empty
+
+def write_json_file( f, j ):
+    try:
+        with open( f, "w" ) as outfile:
+            outfile.write( json.dumps( j, indent = 4 ) )
+    except IOError as e:
+        print( e )
+        sys.exit( )
+
+####################################################################################
+#   Shelly-specific HTTP logic
+####################################################################################
+
 def status_url( address ):
     return "http://" + address + "/status"
 
@@ -1154,158 +1271,6 @@ def get_status( addr, tm, verbose ):
 def get_actions( addr, tm, verbose ):
     url = "http://" + addr + "/settings/actions"
     return get_url( addr, tm, verbose, url, 'to read actions' )
-
-def ota_flash( addr, tm, fw, verbose, dry_run ):
-    url = ota_url( addr, fw )
-    if dry_run:
-        print( url )
-        return False
-    return get_url( addr, tm, verbose, url, 'to flash firmware' )
-
-def fail_msg( s ):
-    for i in range(3): print( )
-    print( s )
-    for i in range(3): print( )
-
-def flash_device( addr, pause_time, verbose, ota, ota_timeout, new_version, dry_run ):
-    print( "Checking old firmware version" )
-    url = "http://" + addr + "/ota"
-    result = get_url( addr, pause_time, verbose, url, 'to get current version' )
-    if not result:
-        print( "Could not get current firmware version for device " + addr )
-        return False
-    print( "status: " + result['status'] + ", version: " + result['old_version'] )
-    if result['old_version'] == new_version:
-        print( "Device is already up-to-date" )
-        return True
-    if result['status'] == 'updating':
-        print( 'Error: Device already shows "updating"' )
-        return False
-    if ota_flash( addr, pause_time, ota, verbose, dry_run ):
-        print( "Sent OTA instructions to " + addr )
-        print( "New Version: " + repr( new_version ) )
-        if ota_timeout == 0: return True
-        print( "Pausing to wait to check for successful OTA flash..." )
-        start_time = time.time( )
-        seen_updating = False
-        passes = 0
-        while time.time( ) < start_time + ota_timeout:
-            passes += 1
-            time.sleep( pause_time )
-            new_result = get_url( addr, pause_time, verbose, url, '' )
-            if not new_result: return False
-            if new_result['status'] == 'updating': 
-                if seen_updating:
-                    print( '.', end='' )
-                    sys.stdout.flush( )
-                else:
-                    print( "status: " + new_result['status'] + ", version: " + new_result['old_version'] )
-                seen_updating = True
-            elif seen_updating:
-                if not new_version or result['old_version'] != new_result['old_version']:
-                    if not new_version or new_result['old_version'] == new_version:
-                        print( "" )
-                        print( "Success. Device " + addr + " updated from " + result['old_version'] + ' to ' + new_result['old_version'] )
-                        return True
-                    else:
-                        print(repr(new_version))
-                        fail_msg( "****possible OTA failure***  Device " + addr + ' still has unexpected build, not matching manifest: ' + new_result['old_version'] )
-                        return False
-                else:
-                    break
-            else:
-                if passes > 10:
-                    print( 'The device ' + addr + ' has never shown status "updating". Is it already on the version requested? ' )
-                    return False
-                print( "status: " + new_result['status'] + ", version: " + new_result['old_version'] )
-        fail_msg( "****possible OTA failure***  Device " + addr + ' still has ' + new_result['old_version'] )
-        return False
-
-    else:
-        if not dry_run: print( "Could not flash firmware to device " + addr )
-        return False
-    return True
-
-def choose_roles( ddwrt_name ):
-    nodes = []
-    ap_node = 0
-    sta_node = len( ddwrt_name ) - 1
-    for node in ddwrt_name:
-        nodes.append( connect_to_known_router( node ) )
-    ap_capable = []
-    sta_capable = []
-    current_ap = []
-    current_sta = []
-    for i in range( len(nodes) ):
-        if 'ap' in nodes[i]['router']: ap_capable.append( i )
-        if 'sta' in nodes[i]['router']: sta_capable.append( i )
-        if 'ap' == nodes[i]['current_mode']: current_ap.append( i )
-        if 'sta' == nodes[i]['current_mode']: current_sta.append( i )
-    if len( ap_capable ) == 0:
-        print( "No AP capable dd-wrt device found. Re-learn the device with it set in AP mode" )
-        sys.exit()
-    if len( sta_capable ) == 0:
-        print( "No client-mode capable dd-wrt device found. Re-learn the device with it set in client mode" )
-        sys.exit()
-    if len( nodes ) > 1:
-        if len( ap_capable ) < 2:
-            ap_node = ap_capable[0]
-            sta_node = ( ap_node + 1 ) % 2
-        elif len( sta_capable ) < 2:
-            sta_node = sta_capable[0]
-            ap_node = ( sta_node + 1 ) % 2
-        elif len( current_ap ) < 2:
-            ap_node = current_ap[0]
-            sta_node = ( ap_node + 1 ) % 2
-        elif len( current_sta ) < 2:
-            sta_node = sta_capable[0]
-            ap_node = ( sta_node + 1 ) % 2
-    return( nodes[ ap_node ], nodes[ sta_node ] )
-
-def discover( cn, prefix ):
-    cmd = "site_survey 2>&1"
-    ( result, err ) = do_cmd( cn['conn'], cmd, cn['eot'] )
-    if not result and err != '':
-        eprint( err )
-        sys.exit( )
-    ret = []
-    for n in range( 1, len( result ) ):
-        r = re.sub( r'.*SSID\[ *(.*)\] BSSID\[.*', r'\1', result[ n ] )
-        if r.startswith( prefix ):
-            ret.append( r )
-    return ret
-
-def check_for_device_queue( dq, group = None, include_complete = False ):
-    txt = "Use import to specify some provisioning instructions."
-    if len( dq ) == 0:
-        print( "List is empty. " + txt )
-        sys.exit()
-    for rec in dq:
-        if ( include_complete or 'CompletedTime' not in rec ) and ( not group or 'Group' in rec and rec[ 'Group' ] == group ):
-            return
-    if group:
-        print( "Group " + group + " has no list entries ready to provision. " + txt )
-    else:
-        print( "List has no entries ready to provision. " + txt )
-    sys.exit()
-
-def ddwrt_wget( cn, url, verbose, msg, tries = 1 ):
-    passes = 0
-    if msg:
-        sys.stdout.write( msg )
-    if verbose > 0:
-        print( url )
-    while True:
-        passes += 1
-        if msg:
-            sys.stdout.write( "." )
-            sys.stdout.flush( )
-        ( result, err ) = do_cmd( cn['conn'], "wget -T 1 -qO- '" + url + "'; echo", cn['eot'] )
-        if ( len(result) > 1 or result[0] != '' ) or passes > tries:
-            break
-        time.sleep( 2 )
-    if msg: print( )
-    return ( result, err )
 
 def get_toggle_url( ip, dev_type ):
     ### return "http://" + ip + "/" + dev_type + "/0?turn=on&timer=1"
@@ -1342,22 +1307,147 @@ def toggle_device( ip_address, dev_type ):
     if success_cnt == 0:
         print( "Unsuccessful attempt to toggle device." )
 
-def v2_deep_update(d, u):
-    for k, v in u.iteritems():
-        if isinstance(v, collections.Mapping):
-            d[k] = v2_deep_update(d.get(k, {}), v)
-        else:
-            d[k] = v
-    return d
+def ota_flash( addr, tm, fw, verbose, dry_run ):
+    url = ota_url( addr, fw )
+    if dry_run:
+        print( url )
+        return False
+    return get_url( addr, tm, verbose, url, 'to flash firmware' )
 
-def v3_deep_update(d, u):
-    for k, v in u.items():
-        if isinstance(v, collections.abc.Mapping):
-            d[k] = v3_deep_update(d.get(k, {}), v)
-        else:
-            d[k] = v
-    return d
+def find_device( dev ):
+    try:
+        attempt = url_read( 'http://' + dev[ 'IP' ] + '/ota', tmout = 0.5 )
+    except:
+        attempt = None
+    if attempt: return True
+    return False
 
+####################################################################################
+#   Output Utilities
+####################################################################################
+
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+def fail_msg( s ):
+    for i in range(3): print( )
+    print( s )
+    for i in range(3): print( )
+
+####################################################################################
+#   Library Functions
+####################################################################################
+
+def check_for_device_queue( dq, group = None, include_complete = False ):
+    txt = "Use import to specify some provisioning instructions."
+    if len( dq ) == 0:
+        print( "List is empty. " + txt )
+        sys.exit()
+    for rec in dq:
+        if ( include_complete or 'CompletedTime' not in rec ) and ( not group or 'Group' in rec and rec[ 'Group' ] == group ):
+            return
+    if group:
+        print( "Group " + group + " has no list entries ready to provision. " + txt )
+    else:
+        print( "List has no entries ready to provision. " + txt )
+    sys.exit()
+
+def short_heading( c ):
+    return c if re.search( '\.[0-9]+\.', c ) else re.sub( '.*\.', '', c )
+
+def get_name_value_pairs( query_conditions, term_type = '--query-condition' ):
+    result = [ x.split('=') for x in query_conditions.split(',') ] if query_conditions else []
+    for q in result:
+        if len(q) < 2:
+            print( "Each " + term_type + " term must contain name=value" )
+            sys.exit()
+    return result
+
+def complete_probe( args, rec, initial_status = None ):
+    global device_db
+
+    ip_address = rec[ 'ProbeIP' ]
+    if not args.refresh or args.operation == 'probe-list': eprint( ip_address )
+    if not initial_status:
+        initial_status = get_url( ip_address, args.pause_time, args.verbose, status_url( ip_address ), 'to get current status' )
+    if initial_status:
+        if args.verbose > 1:
+            print( ip_address )
+        configured_settings = get_url( ip_address, args.pause_time, args.verbose, get_settings_url( ip_address ), 'to get config' )
+        actions = get_actions( ip_address, 1, args.verbose )
+        if actions and 'actions' in actions:
+            rec['actions'] = actions[ 'actions' ]
+        id = initial_status['mac']
+        if id in device_db:
+            rec.update( device_db[ id ] )
+        else:
+            rec['ProbeTime'] = time.time()
+        rec['UpdateTime'] = time.time()
+        rec['status'] = initial_status
+        if configured_settings:
+            rec['settings'] = configured_settings
+            rec['CompletedTime'] = time.time()
+        else:
+            print( "Failed to update settings for " + id )
+        rec['Origin'] = 'probe-list'
+        rec['IP'] = ip_address
+        rec['ID'] = id
+        device_db[ id ] = rec
+
+def import_json( file, queue_file ):
+    list = read_json_file( file, 'fail' )
+    append_list( list )
+    write_json_file( queue_file, device_queue )
+
+def import_csv( file, queue_file ):
+    with open( file ) as csvfile:
+       reader = csv.DictReader( csvfile )
+       append_list( reader )
+    write_json_file( queue_file, device_queue )
+
+def finish_up_device( device, rec, operation, args, new_version, initial_status, configured_settings = None ):
+    global device_db
+    rec[ 'ConfirmedTime' ] = time.time()
+    #need_update = False
+
+    if not configured_settings: configured_settings = get_url( device, args.pause_time, args.verbose, get_settings_url( device, rec ), 'to get config' )
+    rec[ 'status' ] = initial_status
+    rec[ 'settings' ] = configured_settings if configured_settings else {}
+    rec[ 'Origin' ] = operation
+    print( "in finish_up_device: " + repr( initial_status ) )
+    rec[ 'ID' ] = initial_status[ 'mac' ]
+    rec[ 'IP' ] = initial_status[ 'wifi_sta' ][ 'ip' ]
+    device_db[ initial_status[ 'mac' ] ] = rec
+    write_json_file( args.device_db, device_db )
+
+    #if 'DeviceName' in rec:
+    #    new_settings = get_url( device, args.pause_time, args.verbose, get_settings_url( device, rec ), 'to set device name' )
+    #    need_update = True
+    #    rec['settings'] = new_settings
+
+    if args.ota != '':
+        if flash_device( device, args.pause_time, args.verbose, args.ota, args.ota_timeout, new_version, args.dry_run ):
+    #        need_update = True
+            new_status = get_status( device, args.pause_time, args.verbose )
+            rec['status'] = new_status if new_status else {}
+    #if need_update:
+            device_db[ initial_status['mac'] ] = rec
+            write_json_file( args.device_db, device_db )
+
+    if args.print_using: 
+        print_label( rec )
+
+    if args.toggle:
+        try:
+            print( "Toggling power on newly provisioned device. Unplug to continue." )
+            toggle_device( device, configured_settings['device']['type'] )
+        except KeyboardInterrupt as error:
+            print( )
+            print( )
+
+####################################################################################
+#   Query/db functions
+####################################################################################
 
 def flatten( d, prefix='', devtype = None ):
     result = { }
@@ -1441,13 +1531,68 @@ def print_details( col, paths, verbosity, max_width ):
     else:
         print( col )
 
-def get_name_value_pairs( query_conditions, term_type = '--query-condition' ):
-    result = [ x.split('=') for x in query_conditions.split(',') ] if query_conditions else []
-    for q in result:
-        if len(q) < 2:
-            print( "Each " + term_type + " term must contain name=value" )
-            sys.exit()
-    return result
+####################################################################################
+#   Operations
+####################################################################################
+
+def flash_device( addr, pause_time, verbose, ota, ota_timeout, new_version, dry_run ):
+    print( "Checking old firmware version" )
+    url = "http://" + addr + "/ota"
+    result = get_url( addr, pause_time, verbose, url, 'to get current version' )
+    if not result:
+        print( "Could not get current firmware version for device " + addr )
+        return False
+    print( "status: " + result['status'] + ", version: " + result['old_version'] )
+    if result['old_version'] == new_version:
+        print( "Device is already up-to-date" )
+        return True
+    if result['status'] == 'updating':
+        print( 'Error: Device already shows "updating"' )
+        return False
+    if ota_flash( addr, pause_time, ota, verbose, dry_run ):
+        print( "Sent OTA instructions to " + addr )
+        print( "New Version: " + repr( new_version ) )
+        if ota_timeout == 0: return True
+        print( "Pausing to wait to check for successful OTA flash..." )
+        start_time = time.time( )
+        seen_updating = False
+        passes = 0
+        while time.time( ) < start_time + ota_timeout:
+            passes += 1
+            time.sleep( pause_time )
+            new_result = get_url( addr, pause_time, verbose, url, '' )
+            if not new_result: return False
+            if new_result['status'] == 'updating': 
+                if seen_updating:
+                    print( '.', end='' )
+                    sys.stdout.flush( )
+                else:
+                    print( "status: " + new_result['status'] + ", version: " + new_result['old_version'] )
+                seen_updating = True
+            elif seen_updating:
+                if not new_version or result['old_version'] != new_result['old_version']:
+                    if not new_version or new_result['old_version'] == new_version:
+                        print( "" )
+                        print( "Success. Device " + addr + " updated from " + result['old_version'] + ' to ' + new_result['old_version'] )
+                        return True
+                    else:
+                        print(repr(new_version))
+                        fail_msg( "****possible OTA failure***  Device " + addr + ' still has unexpected build, not matching manifest: ' + new_result['old_version'] )
+                        return False
+                else:
+                    break
+            else:
+                if passes > 10:
+                    print( 'The device ' + addr + ' has never shown status "updating". Is it already on the version requested? ' )
+                    return False
+                print( "status: " + new_result['status'] + ", version: " + new_result['old_version'] )
+        fail_msg( "****possible OTA failure***  Device " + addr + ' still has ' + new_result['old_version'] )
+        return False
+
+    else:
+        if not dry_run: print( "Could not flash firmware to device " + addr )
+        return False
+    return True
 
 def schema( args ):
     query_columns = args.query_columns.split(',') if args.query_columns else []
@@ -1583,17 +1728,6 @@ def apply( args, new_version, data, need_write ):
 
     return( configured_settings, need_write )
 
-def short_heading( c ):
-    return c if re.search( '\.[0-9]+\.', c ) else re.sub( '.*\.', '', c )
-
-def find_device( dev ):
-    try:
-        attempt = url_read( 'http://' + dev[ 'IP' ] + '/ota', tmout = 0.5 )
-    except:
-        attempt = None
-    if attempt: return True
-    return False
-
 def query( args, new_version = None ):
     global device_db
     need_write = False
@@ -1727,37 +1861,6 @@ def query( args, new_version = None ):
     if need_write:
         write_json_file( args.device_db, device_db )
 
-def complete_probe( args, rec, initial_status = None ):
-    global device_db
-
-    ip_address = rec[ 'ProbeIP' ]
-    if not args.refresh or args.operation == 'probe-list': eprint( ip_address )
-    if not initial_status:
-        initial_status = get_url( ip_address, args.pause_time, args.verbose, status_url( ip_address ), 'to get current status' )
-    if initial_status:
-        if args.verbose > 1:
-            print( ip_address )
-        configured_settings = get_url( ip_address, args.pause_time, args.verbose, get_settings_url( ip_address ), 'to get config' )
-        actions = get_actions( ip_address, 1, args.verbose )
-        if actions and 'actions' in actions:
-            rec['actions'] = actions[ 'actions' ]
-        id = initial_status['mac']
-        if id in device_db:
-            rec.update( device_db[ id ] )
-        else:
-            rec['ProbeTime'] = time.time()
-        rec['UpdateTime'] = time.time()
-        rec['status'] = initial_status
-        if configured_settings:
-            rec['settings'] = configured_settings
-            rec['CompletedTime'] = time.time()
-        else:
-            print( "Failed to update settings for " + id )
-        rec['Origin'] = 'probe-list'
-        rec['IP'] = ip_address
-        rec['ID'] = id
-        device_db[ id ] = rec
-
 def probe_list( args ):
     query_conditions = [ x.split('=') for x in args.query_conditions.split(',') ] if args.query_conditions else []
     if args.refresh:
@@ -1807,7 +1910,7 @@ def provision_list( args, new_version ):
     global device_queue, device_db
     t1 = timeit.default_timer()
     check_for_device_queue( device_queue, args.group )
-    ( ap_node, sta_node ) = choose_roles( args.ddwrt_name )
+    ( ap_node, sta_node ) = ddwrt_choose_roles( args.ddwrt_name )
     if args.timing: print( 'setup time: ', round( timeit.default_timer() - t1, 2 ) )
     setup_count = 0
     success_count = 0
@@ -1826,7 +1929,7 @@ def provision_list( args, new_version ):
             sys.stdout.write( "." )
             sys.stdout.flush()
             t1 = timeit.default_timer()
-            device_ssids = discover( sta_node, args.prefix )
+            device_ssids = ddwrt_discover( sta_node, args.prefix )
             if len( device_ssids ) > 0:
                 if args.timing: print( 'discover time: ', round( timeit.default_timer() - t1, 2 ) )
                 print( "" )
@@ -1841,9 +1944,9 @@ def provision_list( args, new_version ):
                     # With different ddwrt devices, faster to pre-configure AP
                     t1 = timeit.default_timer()
                     if ap_node[ 'router' ][ 'et0macaddr' ] != sta_node[ 'router' ][ 'et0macaddr' ]:
-                        set_ap_mode( ap_node, rec[ 'SSID' ], rec[ 'Password' ] )
+                        ddwrt_set_ap_mode( ap_node, rec[ 'SSID' ], rec[ 'Password' ] )
 
-                    set_sta_mode( sta_node, device_ssids[0] )
+                    ddwrt_set_sta_mode( sta_node, device_ssids[0] )
                     if args.timing: print( 'dd-wrt device configuration time: ', round( timeit.default_timer() - t1, 2 ) )
 
                     t1 = timeit.default_timer()
@@ -1868,7 +1971,7 @@ def provision_list( args, new_version ):
                     while misses < 3 and passes < 60:
                         time.sleep( 1 )
                         passes += 1
-                        check_ssids = discover( ap_node, args.prefix )
+                        check_ssids = ddwrt_discover( ap_node, args.prefix )
                         if device_ssids[ 0 ] in check_ssids:
                             misses = 0
                             sys.stdout.write( "." )
@@ -1891,7 +1994,7 @@ def provision_list( args, new_version ):
                 # If just one ddwrt device, then switch from sta back to AP now
                 if ap_node[ 'router' ][ 'et0macaddr' ] == sta_node[ 'router' ][ 'et0macaddr' ]:
                     t1 = timeit.default_timer()
-                    set_ap_mode( ap_node, rec[ 'SSID' ], rec[ 'Password' ] )
+                    ddwrt_set_ap_mode( ap_node, rec[ 'SSID' ], rec[ 'Password' ] )
                     if args.timing: print( 'dd-wrt device reconfig time: ', round( timeit.default_timer() - t1, 2 ) )
 
                 t1 = timeit.default_timer()
@@ -1997,57 +2100,6 @@ def print_list( queue_file, group ):
 
 def clear_list( queue_file ):
     write_json_file( queue_file, [] )
-
-def import_json( file, queue_file ):
-    list = read_json_file( file, 'fail' )
-    append_list( list )
-    write_json_file( queue_file, device_queue )
-
-def import_csv( file, queue_file ):
-    with open( file ) as csvfile:
-       reader = csv.DictReader( csvfile )
-       append_list( reader )
-    write_json_file( queue_file, device_queue )
-
-def finish_up_device( device, rec, operation, args, new_version, initial_status, configured_settings = None ):
-    global device_db
-    rec[ 'ConfirmedTime' ] = time.time()
-    #need_update = False
-
-    if not configured_settings: configured_settings = get_url( device, args.pause_time, args.verbose, get_settings_url( device, rec ), 'to get config' )
-    rec[ 'status' ] = initial_status
-    rec[ 'settings' ] = configured_settings if configured_settings else {}
-    rec[ 'Origin' ] = operation
-    print( "in finish_up_device: " + repr( initial_status ) )
-    rec[ 'ID' ] = initial_status[ 'mac' ]
-    rec[ 'IP' ] = initial_status[ 'wifi_sta' ][ 'ip' ]
-    device_db[ initial_status[ 'mac' ] ] = rec
-    write_json_file( args.device_db, device_db )
-
-    #if 'DeviceName' in rec:
-    #    new_settings = get_url( device, args.pause_time, args.verbose, get_settings_url( device, rec ), 'to set device name' )
-    #    need_update = True
-    #    rec['settings'] = new_settings
-
-    if args.ota != '':
-        if flash_device( device, args.pause_time, args.verbose, args.ota, args.ota_timeout, new_version, args.dry_run ):
-    #        need_update = True
-            new_status = get_status( device, args.pause_time, args.verbose )
-            rec['status'] = new_status if new_status else {}
-    #if need_update:
-            device_db[ initial_status['mac'] ] = rec
-            write_json_file( args.device_db, device_db )
-
-    if args.print_using: 
-        print_label( rec )
-
-    if args.toggle:
-        try:
-            print( "Toggling power on newly provisioned device. Unplug to continue." )
-            toggle_device( device, configured_settings['device']['type'] )
-        except KeyboardInterrupt as error:
-            print( )
-            print( )
 
 def provision( credentials, args, new_version ):
     prior_ssids = {}
@@ -2175,6 +2227,10 @@ def factory_reset( device_address, verbose ):
             return
         print( "Unexpected error:", sys.exc_info( )[0] )
 
+####################################################################################
+#   Option validation
+####################################################################################
+
 def validate_options( vars ):
     op = vars[ 'operation' ]
     incompatible = []
@@ -2228,6 +2284,10 @@ def validate_options( vars ):
     elif len( required ) == 1:
         print( "The option --" + required[ 0 ] + " is required with the " + op + " operation" )
         sys.exit()
+
+####################################################################################
+#   Main
+####################################################################################
 
 
 def main():
@@ -2460,14 +2520,14 @@ if __name__ == '__main__':
 #def ddwrt_apply( tn, mode ):
 #    """failed attempt to do everything the "apply" button in the GUI does, to avoid needing to use http/CGI approach (which takes 20s)"""
 #    if mode == 'sta':
-#        get_single_line_result( tn, "/sbin/ifconfig eth2 192.168.33.10" )
-#    get_single_line_result( tn, "stopservice nas;stopservice wlconf;startservice wlconf 2>/dev/null;startservice nas" )
+#        ddwrt_get_single_line_result( tn, "/sbin/ifconfig eth2 192.168.33.10" )
+#    ddwrt_get_single_line_result( tn, "stopservice nas;stopservice wlconf;startservice wlconf 2>/dev/null;startservice nas" )
 #    if mode == 'sta':
-#        get_single_line_result( tn, "route del default netmask 0.0.0.0 dev br0" )
-#        get_single_line_result( tn, "route add -net 192.168.33.0 netmask 255.255.255.0 dev eth2" )
-#        get_single_line_result( tn, "route add default gw 192.168.33.1 netmask 0.0.0.0 dev br0" )
-#        get_single_line_result( tn, "route add default gw 192.168.33.1 netmask 0.0.0.0 dev eth2" )
+#        ddwrt_get_single_line_result( tn, "route del default netmask 0.0.0.0 dev br0" )
+#        ddwrt_get_single_line_result( tn, "route add -net 192.168.33.0 netmask 255.255.255.0 dev eth2" )
+#        ddwrt_get_single_line_result( tn, "route add default gw 192.168.33.1 netmask 0.0.0.0 dev br0" )
+#        ddwrt_get_single_line_result( tn, "route add default gw 192.168.33.1 netmask 0.0.0.0 dev eth2" )
 #    else:
-#        get_single_line_result( tn, "route del -net 192.168.33.0 netmask 255.255.255.0 dev eth2" )
-#        get_single_line_result( tn, "route del default gw 192.168.33.1 netmask 0.0.0.0 dev br0" )
-#        get_single_line_result( tn, "route del default gw 192.168.33.1 netmask 0.0.0.0 dev eth2" )
+#        ddwrt_get_single_line_result( tn, "route del -net 192.168.33.0 netmask 255.255.255.0 dev eth2" )
+#        ddwrt_get_single_line_result( tn, "route del default gw 192.168.33.1 netmask 0.0.0.0 dev br0" )
+#        ddwrt_get_single_line_result( tn, "route del default gw 192.168.33.1 netmask 0.0.0.0 dev eth2" )
