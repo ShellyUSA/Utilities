@@ -1427,13 +1427,15 @@ def finish_up_device( device, rec, operation, args, new_version, initial_status,
             if pair[0] not in rec:
                 rec[ pair[0] ] = pair[1]
 
+    rec[ 'Origin' ] = operation
+    rec[ 'ID' ] = initial_status[ 'mac' ]
+    rec[ 'IP' ] = initial_status[ 'wifi_sta' ][ 'ip' ]
+
+    rec = copy.deepcopy( rec )
     if not configured_settings: configured_settings = get_url( device, args.pause_time, args.verbose, get_settings_url( device, rec ), 'to get config' )
     rec[ 'status' ] = initial_status
     rec[ 'settings' ] = configured_settings if configured_settings else {}
-    rec[ 'Origin' ] = operation
     print( "in finish_up_device: " + repr( initial_status ) )
-    rec[ 'ID' ] = initial_status[ 'mac' ]
-    rec[ 'IP' ] = initial_status[ 'wifi_sta' ][ 'ip' ]
     device_db[ initial_status[ 'mac' ] ] = rec
     write_json_file( args.device_db, device_db )
 
@@ -2021,6 +2023,8 @@ def provision_native( credentials, args, new_version ):
                 print( "Could not reconnect to " + ssid )
                 break
             rec[ 'CompletedTime' ] = time.time()
+            success_count += 1
+            write_json_file( args.device_queue, device_queue )
 
             if 'StaticIP' in rec:
                 ip_address = rec[ 'StaticIP' ]
@@ -2035,9 +2039,7 @@ def provision_native( credentials, args, new_version ):
             else:
                 print( "Could not find device on " + ssid + ' network' )
                 break
-            rec[ 'CompletedTime' ] = time.time()
-            success_count += 1
-            write_json_file( args.device_queue, device_queue )
+
         else:
             if args.wait_time == 0:
                 print("Exiting. No additional devices found and wait-time is 0. Set non-zero wait-time to poll for multiple devices.")
@@ -2137,8 +2139,6 @@ def provision_ddwrt( args, new_version ):
                 else:
                     ip_address = device_ssids[ 0 ]
 
-                rec[ 'CompletedTime' ] = time.time()
-
                 msg = "Finding " + ip_address + " on new network"
                 ( response, err ) = ddwrt_wget( ap_node, get_settings_url( ip_address, rec ), args.verbose, msg, 40 )
                 configured_settings = json.loads(response[0])
@@ -2150,6 +2150,7 @@ def provision_ddwrt( args, new_version ):
                     sys.exit()
 
                 success_count += 1
+                rec[ 'CompletedTime' ] = time.time()
                 write_json_file( args.device_queue, device_queue )
 
                 if args.verbose > 1: print( repr( configured_settings ) )
@@ -2157,6 +2158,7 @@ def provision_ddwrt( args, new_version ):
 
                 new_status = get_status( ip_address, args.pause_time, args.verbose )
                 finish_up_device( ip_address, rec, args.operation, args, new_version, new_status, configured_settings )
+
                 break
             else:
                 ## print( 'Found no new devices. Waiting ' + str(args.wait_time) + ' seconds before looking again. Press ^C to cancel' )
