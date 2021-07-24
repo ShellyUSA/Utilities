@@ -24,7 +24,9 @@
 #
 #  Changes:
 #
-# 1.0006     
+# 1.0006     Now provision-list can work without dd-wrt devices, but only to program IoT devices onto the same
+#            WiFi network as the computer/laptop.  This allows other fields like Static IP and device name to be
+#            set during initial provisioning.  The provision-list operation is also compatible with --settings now.
 #
 # 1.0005     Added --access ALL|Periodic|Continuous features for probe-list and apply to work with
 #            battery-powered devices with periodic WiFi access
@@ -37,9 +39,9 @@
 #            added --settings to support Lat/Lng with simple provision operation
 #            improved error handling of timeouts during factory-reset
 #
-# 1.0002   - fixed IP address by re-getting status in provision_list()
+# 1.0002   - fixed IP address by re-getting status in provision_ddwrt()
 #            fixed some python3 compatibility issues
-#            re-fetch settings after device name changes in provision()/provision_list()
+#            re-fetch settings after device name changes in provision_native()/provision_ddwrt()
 #            added identify operation
 #            added --restore option to apply
 #            added Gateway to import column options
@@ -49,11 +51,12 @@
 ######################################################################################################################
 #
 #  TODO:
+#            Allow omission of password in import (or a placeholder like "tbd") so it can work with single SSID/pw mode
+#            of list-provision, where no DD-WRT device is specified.
 #            Check Shelly firmware version (for LATEST)
 #            OTA update settings/status after complete (or fix this)
 #
 #            make provision-list work without dd-wrt... rename provision_list and provision to provision_ddwrt and provision_native(?)
-#            make --settings work with provision-list and provision-settings, as defaults(?)
 #
 #  NICE-TO-HAVES:
 #            Insure it's a 2.4GHz network
@@ -134,8 +137,8 @@ exclude_from_copy = [ 'actions.names','alt_modes','build_info','calibrated','dev
                       'unixtime','settings.meters','settings.fw_mode','settings.login.default_username' ]
 
 init = None
-connect = None
-reconnect = None
+wifi_connect = None
+wifi_reconnect = None
 urlquote = None
 deep_update = None
 url_read = None
@@ -268,7 +271,9 @@ def help_provision( ):
                  computer where the program is run.  Its functionality is limited in comparison to the provision-list operation, since all
                  discovered devices will be attached to the same local network.
 
-                     --ssid (required)           SSID of the local WiFi network.
+                     --ssid                      SSID of the local WiFi network.  Specifying on the command line removes the step to 
+                                                 confirm it is the proper one...  Make sure it is a 2.4GHz network and the same one the
+                                                 computer is using.
 
                      --wait-time                 Time to wait on each pass looking for new devices, 0 for just once
 
@@ -358,6 +363,9 @@ def help_provision_list( ):
                      --prefix STRING             SSID prefix applied to discovering new devices (default: shelly)
 
                      --time-to-pause (-p)        Time to pause after various provisioning steps
+
+                     --settings N=V,N=V...       Supply LatLng or defaults other values to apply during provisioning step.  Supported 
+                                                 attributes: DeviceName, LatLng, TZ
                 """))
 
 def help_ddwrt_learn( ):
@@ -781,7 +789,7 @@ def pc_get_cred():
     pw = pc_get_cmd_output( 'cmd /c "netsh wlan show profile name=' + ssid + ' key=clear | findstr Key"', 'Key Content', "Could not determine pasword for network " + ssid )
     return { 'profile' : ssid, 'ssid' : ssid, 'password' : pw }
 
-def pc_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
+def pc_wifi_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
     if prefix:
         # it's necessary to disconnect in order to have wlan show networks show all networks
         os.system('cmd /c "netsh wlan disconnect"')
@@ -808,7 +816,7 @@ def pc_connect( credentials, str, prefix = False, password = '', ignore_ssids = 
     os.system('cmd /c "netsh wlan connect name=' + network + '"')
     return network
 
-def pc_reconnect( credentials ):
+def pc_wifi_reconnect( credentials ):
     os.system('cmd /c "netsh wlan connect name=' + credentials['profile'] + '"')
     return True
 
@@ -834,7 +842,7 @@ def mac_get_cred():
         sys.exit()
     return {'profile' : ssid, 'ssid' : ssid, 'password' : pw.decode("ascii") }
 
-def mac_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
+def mac_wifi_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
     passes = 0
     while passes < 5:
         for i in range( 3 ):
@@ -874,8 +882,8 @@ def mac_connect( credentials, str, prefix = False, password = '', ignore_ssids =
         return found.ssid()
     return None
 
-def mac_reconnect( credentials ):
-    return mac_connect( credentials, credentials['ssid'], prefix = False, password = credentials['password'] )
+def mac_wifi_reconnect( credentials ):
+    return mac_wifi_connect( credentials, credentials['ssid'], prefix = False, password = credentials['password'] )
 
 ####################################################################################
 #   DD-WRT interactions
@@ -1338,18 +1346,21 @@ def fail_msg( s ):
 #   Library Functions
 ####################################################################################
 
-def check_for_device_queue( dq, group = None, include_complete = False ):
-    txt = "Use import to specify some provisioning instructions."
+def check_for_device_queue( dq, group = None, include_complete = False, ssid = None ):
+    txt = " for SSID " + ssid if ssid else ""
+    txt += ". Use import to specify some provisioning instructions."
     if len( dq ) == 0:
         print( "List is empty. " + txt )
         sys.exit()
     for rec in dq:
-        if ( include_complete or 'CompletedTime' not in rec ) and ( not group or 'Group' in rec and rec[ 'Group' ] == group ):
+        if ( include_complete or 'CompletedTime' not in rec ) and \
+           ( not group or 'Group' in rec and rec[ 'Group' ] == group ) and \
+           ( not ssid or 'SSID' in rec and rec[ 'SSID' ] == ssid ):
             return
     if group:
-        print( "Group " + group + " has no list entries ready to provision. " + txt )
+        print( "Group " + group + " has no list entries ready to provision" + txt )
     else:
-        print( "List has no entries ready to provision. " + txt )
+        print( "List has no entries ready to provision" + txt )
     sys.exit()
 
 def short_heading( c ):
@@ -1410,6 +1421,12 @@ def finish_up_device( device, rec, operation, args, new_version, initial_status,
     rec[ 'ConfirmedTime' ] = time.time()
     #need_update = False
 
+    settings = get_name_value_pairs( args.settings, term_type = '--settings' )
+    for pair in settings:
+        if pair[0] in ( 'DeviceName', 'LatLng', 'TZ' ):
+            if pair[0] not in rec:
+                rec[ pair[0] ] = pair[1]
+
     if not configured_settings: configured_settings = get_url( device, args.pause_time, args.verbose, get_settings_url( device, rec ), 'to get config' )
     rec[ 'status' ] = initial_status
     rec[ 'settings' ] = configured_settings if configured_settings else {}
@@ -1444,6 +1461,25 @@ def finish_up_device( device, rec, operation, args, new_version, initial_status,
         except KeyboardInterrupt as error:
             print( )
             print( )
+
+def read_device_queue( dq, args, ssid ):
+    if args.operation == 'provision-list':
+        for rec in device_queue:
+            if 'SSID' not in rec:
+                continue
+            if 'CompletedTime' in rec or args.group and ( not 'Group' in rec or rec[ 'Group' ] != args.group ) or \
+                ssid and ssid != rec[ 'SSID' ]:
+                continue
+            yield rec
+    else:
+        while True:
+            rec = { 'SSID' : ssid }
+            yield rec
+
+def prompt_to_continue( ):
+    print()
+    print()
+    getpass.getpass( "Press <enter> to continue" )
 
 ####################################################################################
 #   Query/db functions
@@ -1906,7 +1942,111 @@ def probe_list( args ):
     if need_write:
         write_json_file( args.device_db, device_db )
 
-def provision_list( args, new_version ):
+def provision_native( credentials, args, new_version ):
+    global device_queue, device_db
+    t1 = timeit.default_timer()
+
+    prior_ssids = {}
+    ssid = credentials['ssid']
+    pw = credentials['password']
+
+    if args.ssid and args.ssid != ssid:
+        print('Connect to ' + args.ssid + ' first')
+        sys.exit()
+
+    if not args.ssid:
+        print( "Found current SSID " + ssid + ". Please be sure this is a 2.4GHz network before proceeding." )
+
+    if args.operation == 'provision-list':
+        check_for_device_queue( device_queue, args.group, ssid = ssid )
+
+    if not args.ssid:
+        answer = input( 'Connect devices to SSID ' + ssid + '? (Y/N)> ' )
+        if answer.upper() not in ('Y','YES'):
+            print('Connect to desired SSID first')
+            sys.exit()
+    init()
+    setup_count = 0
+    success_count = 0
+    for rec in read_device_queue( device_queue, args, None ):
+        if setup_count > 0 and args.cue:
+            prompt_to_continue()
+        setup_count += 1
+        sys.stdout.write( "Waiting to discover a new device" )
+
+        init()
+        t1 = timeit.default_timer()
+        found = wifi_connect( credentials, args.prefix, prefix=True, ignore_ssids=prior_ssids, verbose=args.verbose )
+        if found:
+            rec[ 'InProgressTime' ] = time.time()
+
+            if args.timing: print( 'discover time: ', round( timeit.default_timer() - t1, 2 ) )
+            print( "Ready to provision " + found + " with " + repr( rec ) )
+            prior_ssids[ found ] = 1
+            time.sleep( args.pause_time )
+            if not get_status( factory_device_addr, args.pause_time, args.verbose ):
+                if not wifi_reconnect( credentials ):
+                    print( "Could not reconnect to " + ssid )
+                break
+
+            rec[ 'factory_ssid' ] = found
+            rec[ 'InProgressTime' ] = time.time()
+            write_json_file( args.device_queue, device_queue )
+
+            got_one = False
+            setup_count += 1
+            for i in range(5):
+                time.sleep( args.pause_time )
+                # Load the URL three times, even if we are successful the first time
+                for j in range(3):
+                    try:
+                        if args.operation == 'provision-list' and 'StaticIP' in rec:
+                            req = set_settings_url( factory_device_addr, ssid, pw, rec[ 'StaticIP'], rec[ 'NetMask' ], rec[ 'Gateway' ] )
+                        else:
+                            req = set_settings_url( factory_device_addr, ssid, pw, None, None, None )
+
+                        content = json.loads( url_read( req ) )
+                        if args.verbose > 1:
+                            print( repr( content ) )
+                        got_one = True
+                    except:
+                        if not got_one: eprint( "Unexpected error:", sys.exc_info( )[0] )
+                if got_one: break
+            if not got_one:
+                print( "Tried 15 times and could not instruct device to set up network" )
+                sys.exit( )
+
+            ### Connect (back) to main network
+            if not wifi_reconnect( credentials ):
+                print( "Could not reconnect to " + ssid )
+                break
+            rec[ 'CompletedTime' ] = time.time()
+
+            if 'StaticIP' in rec:
+                ip_address = rec[ 'StaticIP' ]
+            else:
+                ip_address = found
+
+            initial_status = get_status( ip_address, args.pause_time, args.verbose )
+
+            if initial_status:
+                print( "Confirmed device " + found + " on " + ssid + ' network' )
+                finish_up_device( ip_address, rec, args.operation, args, new_version, initial_status )
+            else:
+                print( "Could not find device on " + ssid + ' network' )
+                break
+            rec[ 'CompletedTime' ] = time.time()
+            success_count += 1
+            write_json_file( args.device_queue, device_queue )
+        else:
+            if args.wait_time == 0:
+                print("Exiting. No additional devices found and wait-time is 0. Set non-zero wait-time to poll for multiple devices.")
+                break
+            if args.verbose > 0:
+                print( 'Found no new devices. Waiting ' + str(args.wait_time) + ' seconds before looking again. Press ^C to cancel' )
+            time.sleep( args.wait_time )
+
+def provision_ddwrt( args, new_version ):
     global device_queue, device_db
     t1 = timeit.default_timer()
     check_for_device_queue( device_queue, args.group )
@@ -1914,15 +2054,9 @@ def provision_list( args, new_version ):
     if args.timing: print( 'setup time: ', round( timeit.default_timer() - t1, 2 ) )
     setup_count = 0
     success_count = 0
-    for rec in device_queue:
-        if 'CompletedTime' in rec or args.group and ( not 'Group' in rec or rec[ 'Group' ] != args.group ):
-            continue
-        if 'SSID' not in rec:
-            continue
+    for rec in read_device_queue( device_queue, args, None ):
         if setup_count > 0 and args.cue:
-            print()
-            print()
-            getpass.getpass( "Press <enter> to continue" )
+            prompt_to_continue()
         setup_count += 1
         sys.stdout.write( "Waiting to discover a new device" )
         while True:
@@ -1933,7 +2067,7 @@ def provision_list( args, new_version ):
             if len( device_ssids ) > 0:
                 if args.timing: print( 'discover time: ', round( timeit.default_timer() - t1, 2 ) )
                 print( "" )
-                print( "Ready to program " + device_ssids[0] + " with " + repr( rec ) )
+                print( "Ready to provision " + device_ssids[0] + " with " + repr( rec ) )
                 rec[ 'factory_ssid' ] = device_ssids[0]
                 rec[ 'InProgressTime' ] = time.time()
                 write_json_file( args.device_queue, device_queue )
@@ -2022,7 +2156,7 @@ def provision_list( args, new_version ):
                 print( )
 
                 new_status = get_status( ip_address, args.pause_time, args.verbose )
-                finish_up_device( ip_address, rec, 'provision-list', args, new_version, new_status, configured_settings )
+                finish_up_device( ip_address, rec, args.operation, args, new_version, new_status, configured_settings )
                 break
             else:
                 ## print( 'Found no new devices. Waiting ' + str(args.wait_time) + ' seconds before looking again. Press ^C to cancel' )
@@ -2101,88 +2235,6 @@ def print_list( queue_file, group ):
 def clear_list( queue_file ):
     write_json_file( queue_file, [] )
 
-def provision( credentials, args, new_version ):
-    prior_ssids = {}
-    ssid = credentials['ssid']
-    pw = credentials['password']
-    setup_count = 0
-
-    settings = get_name_value_pairs( args.settings, term_type = '--settings' )
-
-    if args.ssid and args.ssid != ssid:
-        print('Connect to ' + args.ssid + ' first')
-        sys.exit()
-
-    if not args.ssid:
-        print( "Found current SSID " + ssid + ". Please be sure this is a 2.4GHz network before proceeding." )
-        answer = input( 'Connect devices to SSID ' + ssid + '? (Y/N)> ' )
-        if answer.upper() not in ('Y','YES'):
-            print('Connect to desired SSID first')
-            sys.exit()
-
-    init()
-    while True:
-        if setup_count > 0 and args.cue:
-            print()
-            print()
-            getpass.getpass( "Press <enter> to continue" )
-        init()
-        found = connect( credentials, args.prefix, prefix=True, ignore_ssids=prior_ssids, verbose=args.verbose )
-        if found:
-            rec = { }
-            rec[ 'InProgressTime' ] = time.time()
-
-            print( "Found: " + found )
-            prior_ssids[ found ] = 1
-            time.sleep( args.pause_time )
-            if not get_status( factory_device_addr, args.pause_time, args.verbose ):
-                if not reconnect( credentials ):
-                    print( "Could not reconnect to " + ssid )
-                break
-
-            got_one = False
-            setup_count += 1
-            for i in range(5):
-                time.sleep( args.pause_time )
-                # Load the URL three times, even if we are successful the first time
-                for j in range(3):
-                    try:
-                        req=set_settings_url( factory_device_addr, ssid, pw, None, None, None )
-                        content = json.loads( url_read( req ) )
-                        if args.verbose > 1:
-                            print( repr( content ) )
-                        got_one = True
-                    except:
-                        if not got_one: eprint( "Unexpected error:", sys.exc_info( )[0] )
-                if got_one: break
-            if not got_one:
-                print( "Tried 15 times and could not instruct device to set up network" )
-                sys.exit( )
-
-            ### Connect (back) to main network
-            if not reconnect( credentials ):
-                print( "Could not reconnect to " + ssid )
-                break
-            rec[ 'CompletedTime' ] = time.time()
-
-            initial_status = get_status( found, args.pause_time, args.verbose )
-            if initial_status:
-                print( "Confirmed device " + found + " on " + ssid + ' network' )
-                for pair in settings:
-                    if pair[0] in ( 'DeviceName', 'LatLng', 'TZ' ):
-                        rec[ pair[0] ] = pair[1]
-                finish_up_device( found, rec, 'provision', args, new_version, initial_status )
-            else:
-                print( "Could not find device on " + ssid + ' network' )
-                break
-        else:
-            if args.wait_time == 0:
-                print("Exiting. No additional devices found and wait-time is 0. Set non-zero wait-time to poll for multiple devices.")
-                break
-            if args.verbose > 0:
-                print( 'Found no new devices. Waiting ' + str(args.wait_time) + ' seconds before looking again. Press ^C to cancel' )
-            time.sleep( args.wait_time )
-
 def identify( device_address ):
     toggle_device( device_address, None )
 
@@ -2212,7 +2264,6 @@ def replace_device( db_path, from_device, to_device ):
 
     device_db[ to_device ][ 'actions' ] = device_db[ from_device ][ 'actions' ]
     write_json_file( db_path, device_db )
-    
 
 def factory_reset( device_address, verbose ):
     try:
@@ -2241,7 +2292,7 @@ def validate_options( vars ):
               "apply" : [ "query_conditions", "query_columns", "group", "set_tag", "match_tag", "delete_tag", 
                           "ota", "apply_urls", "refresh", "delete_device", "restore_device", "dry_run", "settings", "access" ],
               "probe-list" : [ "query_conditions", "group", "refresh", "access" ],
-              "provision-list" : [ "group", "ddwrt_name", "group", "cue", "timing", "ota", "print_using", "toggle", "wait_time" ],
+              "provision-list" : [ "group", "ddwrt_name", "group", "cue", "timing", "ota", "print_using", "toggle", "wait_time", "settings" ],
               "provision" : [ "ssid", "wait_time", "ota", "print_using", "toggle", "cue", "settings" ],
               "list" : [ "group" ],
               "clear-list" : [ ]
@@ -2291,7 +2342,7 @@ def validate_options( vars ):
 
 
 def main():
-    global init, connect, reconnect, get_cred, router_db, device_queue, device_db
+    global init, wifi_connect, wifi_reconnect, get_cred, router_db, device_queue, device_db
     p = argparse.ArgumentParser( description='Shelly configuration utility' )
     p.add_argument( '-w', '--time-to-wait', dest='wait_time', metavar='0', type=int, default=0, help='Time to wait on each pass looking for new devices, 0 for just once' )
     p.add_argument( '-s', '--ssid', dest='ssid', metavar='SSID', help='SSID of the current WiFi network, where devices are to be connected' )
@@ -2363,12 +2414,12 @@ def main():
         print_features( )
         return
 
-    if args.operation in [ 'ddwrt-learn' ] and len( args.ddwrt_name ) > 1:
+    if args.operation in [ 'ddwrt-learn' ] and args.ddwrt_name and len( args.ddwrt_name ) > 1:
         p.error( "only one --ddwrt-name (-N) can be specified for ddwrt-learn operation" )
         return
 
-    if args.operation in [ 'provision-list' ] and ( not args.ddwrt_name or len( args.ddwrt_name ) > 2 ):
-        p.error( "the auto-provision operation requires either one or two --ddwrt-name (-N) options" )
+    if args.operation in [ 'provision-list' ] and args.ddwrt_name and len( args.ddwrt_name ) > 2:
+        p.error( "the provision-list operation accepts no more than two --ddwrt-name (-N) options" )
         return
 
     if args.force_platform:
@@ -2384,18 +2435,21 @@ def main():
             platform = 'UNKNOWN'
 
     if platform == 'MAC':
-        connect = mac_connect
-        reconnect = mac_reconnect
+        wifi_connect = mac_wifi_connect
+        wifi_reconnect = mac_wifi_reconnect
         init = mac_init
         get_cred = mac_get_cred
     elif platform == 'PC':
-        connect = pc_connect
-        reconnect = pc_reconnect
+        wifi_connect = pc_wifi_connect
+        wifi_reconnect = pc_wifi_reconnect
         init = noop
         get_cred = pc_get_cred
     elif sys.platform == 'linux':
         if args.operation == 'provision':
             print( "provision operation is not yet supported with linux. Use provision-list instead." )
+            return
+        if args.operation in [ 'provision-list' ] and not args.ddwrt_name:
+            p.error( "with linux, the provision-list operation requires one or two --ddwrt-name (-N) options" )
             return
     else:
         print( "Unsupported OS: " + sys.platform )
@@ -2446,16 +2500,16 @@ def main():
         else:
             import_csv( args.file, args.device_queue )
 
-    elif args.operation == 'provision':
+    elif args.operation == 'provision' or args.operation == 'provision-list' and not args.ddwrt_name:
         init( )
         credentials = get_cred( )
         try:
-            provision( credentials, args, new_version )
+            provision_native( credentials, args, new_version )
         except SystemExit:
             return
         except:
             print( "Attempting to reconnect to " + credentials['ssid'] + " after failure" )
-            reconnect( credentials )
+            wifi_reconnect( credentials )
             raise
 
     elif args.operation == 'factory-reset':
@@ -2468,7 +2522,7 @@ def main():
         ddwrt_learn( args.ddwrt_name[0], args.ddwrt_address, args.ddwrt_password, args.ddwrt_file )
 
     elif args.operation == 'provision-list':
-        provision_list( args, new_version )
+        provision_ddwrt( args, new_version )
 
     elif args.operation == 'list':
         print_list( args.device_queue, args.group )
