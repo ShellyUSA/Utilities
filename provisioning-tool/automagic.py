@@ -56,8 +56,6 @@
 #            Check Shelly firmware version (for LATEST)
 #            OTA update settings/status after complete (or fix this)
 #
-#            make provision-list work without dd-wrt... rename provision_list and provision to provision_ddwrt and provision_native(?)
-#
 #  NICE-TO-HAVES:
 #            Insure it's a 2.4GHz network
 #            mDNS discovery?
@@ -159,23 +157,29 @@ def help_features( ):
     print(dedent(""" 
                  Features:
 
-                 Automatically locates new devices that are in the factory reset state ready to configure.
-                 Each located device can be added to the local WiFi network, using the "provision" operation,
-                 or added to a specific other WiFi network, using the "provision-list" operation.
+                 This utility can be used to provision, maintain, update, and keep an inventory of IoT devices.
+                 There are many different operations available, described briefly here, and in more detail
+                 in the built-in help for the program.  
+
+                 Automatically locate new devices that are in the factory reset state ready to configure.  Each 
+                 located device can be added to the local WiFi network, using the "provision" operation, or added 
+                 to specific other WiFis networks, on a per-device basis, using the "provision-list" operation.  
+                 The provision-list operation can also assign different static IP addresses as subsequent devices 
+                 are configured.
                  
-                 With provision-list, one or two spare DD-WRT routers are used as the client connection and
+                 With provision-list, one or two spare DD-WRT routers can be used as the client connection and
                  WiFi access point, automatically configured at each step to match network SSID of the factory
-                 reset Shelly and the target SSID and credentials specified in a list of instructions given to
-                 the program.  Note that with two DD-WRT devices, the process is much faster, able to provision
+                 reset IoT device and the target SSID and credentials specified in a list of instructions given 
+                 to the program.  Note that with two DD-WRT devices, the process is much faster, able to provision
                  1 to 2 target devices per minute.
                  
-                 When using the provision operation, your computer or laptop will change from one WiFi network 
-                 to another (to connect to the target device's WiFi hotspot to configure it).  Using provision-list,
-                 instead, will mean no loss of WiFi connectivity on your computer, since instructions are sent
-                 to a DD-WRT device to set the WiFi SSID instead.  The provision-list operation is generally twice 
-                 as fast as provision.
+                 When using the simple provision operation, your computer or laptop will change from one WiFi 
+                 network to another (to connect to the target device's WiFi hotspot to configure it).  Using 
+                 the more sophisticated provision-list can mean no loss of WiFi connectivity on your computer, 
+                 since instructions can be sent to a DD-WRT device to set the WiFi SSID instead.  The provision-list 
+                 operation in this mode is generally twice as fast as provision.
 
-                 There are commands to work with the set of instructions used by provision-list, to import, view 
+                 There are commands to work with the set of instructions used by provision-list to import, view 
                  and clear the list: "import," "list," and "clear-list".
                  
                  The provision operation supports only DHCP, while provision-list can setup devices with either
@@ -183,20 +187,20 @@ def help_features( ):
                  device to take an OTA firmware update to the LATEST or a specific version of software.
                  
                  With provision-list there are many additional features, including setting the name of the device
-                 as it shows up in the UI and in the settings web UI.  (Other settings like lat/long can be easily
-                 added in the future.)  The imported list of instructions can include a "Group" column, which 
-                 then allows provision-list to work on a specific set of instructions instead of the entire queue.
-                 A mechanism for automatically printing labels, given a small program provided by the user is
-                 available with both provision and provision-list, but additional attributes like "Label" can be 
-                 added to the imported instructions for provision-list.
+                 as it shows up in the phone app and in the settings web UI, plus latitude/longitude and timezone
+                 on an individual device basis.  The imported list of instructions can include a "Group" column, 
+                 which then allows provision-list to work on a specific set of instructions instead of the entire queue.  
+                 A mechanism for automatically printing labels, given a small program provided by the user, is available 
+                 with both provision and provision-list, but additional attributes like "Label" (a free-form text string) 
+                 can be added to the imported instructions for provision-list.
                  
                  There is a "factory-reset" operation which makes it easy to return a device to factory settings,
-                 given it is on the local WiFi network, and the "flash" operation instructs local devices to take
+                 given it is on the local WiFi network.  The "flash" operation instructs local devices to take
                  an OTA firmware update.
 
                  Additionally, existing devices on the local WiFi network can be probed using the "probe-list" command
                  to discover all of their settings and status.  For battery-powered devices that are only periodically
-                 available on the network, the attribute Access=Periodic lets probe-list run for an extended period of 
+                 available on the network, the option --access=Periodic lets probe-list run for an extended period of 
                  time looking frequently for the devices.  A powerful "query" operation can report on any information 
                  found in the probe.  The "apply" operation allows programming the discovered devices with OTA firmware 
                  updates, as well as making arbitrary settings changes using the --url option.
