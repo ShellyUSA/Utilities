@@ -51,6 +51,14 @@
 ######################################################################################################################
 #
 #  TODO:
+#            include "done" in "list" operation
+#            store Brand=Shelly
+#            store config inputs (TZ,LatLng,DeviceName,...) under ConfigInputs in JSON tree
+#            option to flash: --downgrade
+#                  display choices of old fw versions from the archive page
+#                        http://archive.shelly-tools.de/archive.php           --> yields types
+#                        http://archive.shelly-tools.de/archive.php?type=SH2LED-1           --> yields versions
+#                        http://192.168.1.1/ota?url=http://archive.shelly-tools.de/version/v1.1.10/SH2LED-1.zip
 #            To document: Allow omission of password in import (or a placeholder like "tbd") so it can work with single SSID/pw mode
 #            of list-provision, where no DD-WRT device is specified.
 #            Check Shelly firmware version (for LATEST)
@@ -61,7 +69,6 @@
 #            mDNS discovery?
 #            OTA from local webserver
 #            --ota-version-check=required|skip|try (in case redirect/forwarding would fail)
-#            display choices of old fw versions from the archive page
 #
 #            apply-list(?)  to apply --settings or --url to probe-list devices, instead of db
 #            Simplify some python2/3 compatibility per: http://python-future.org/compatible_idioms.html
@@ -123,7 +130,8 @@ required_keys = [ 'SSID', 'Password' ]
 optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName', 'LatLng', 'TZ', 'Access' ]
 default_query_columns = [ 'type', 'Origin', 'IP', 'ID', 'fw', 'has_update', 'settings.name' ] 
 
-all_operations = ( 'help','features','provision','provision-list','factory-reset','flash','import', 'ddwrt-learn','list', 'clear-list','print-sample','probe-list', 'query', 'apply', 'schema', 'identify', 'replace' )
+all_operations = ( 'help', 'features', 'provision', 'provision-list', 'factory-reset', 'flash', 'import', 'list', 'clear-list', 
+                   'ddwrt-learn', 'print-sample', 'probe-list', 'query', 'apply', 'schema', 'identify', 'replace' )
 
 exclude_setting = [ 'unixtime', 'fw', 'time', 'hwinfo', 'build_info', 'device', 'ison', 'has_timer', 'power', 'connected',
         'ext_humidity','ext_switch','ext_sensors','ext_temperature',    #TODO  -- parameter
@@ -162,11 +170,11 @@ def help_features( more = None ):
                  There are many different operations available, described briefly here, and in more detail
                  in the built-in help for the program.  
 
-                 Automatically locate new devices that are in the factory reset state ready to configure.  Each 
-                 located device can be added to the local WiFi network, using the "provision" operation, or added 
-                 to specific other WiFis networks, on a per-device basis, using the "provision-list" operation.  
-                 The provision-list operation can also assign different static IP addresses as subsequent devices 
-                 are configured.
+                 It can automatically locate new devices that are in the factory reset state, ready to configure.  
+                 Each located device can be added to the local WiFi network, using the "provision" operation, or 
+                 added to specific other WiFi networks, on a per-device basis, using the "provision-list" operation.  
+                 The provision-list operation can also assign different static IP addresses to each device if
+                 required.
                  
                  With provision-list, one or two spare DD-WRT routers can be used as the client connection and
                  WiFi access point, automatically configured at each step to match network SSID of the factory
@@ -181,7 +189,10 @@ def help_features( more = None ):
                  operation in this mode is generally twice as fast as provision.
 
                  There are commands to work with the set of instructions used by provision-list to import, view 
-                 and clear the list: "import," "list," and "clear-list".
+                 and clear the list: "import," "list," and "clear-list".  The concept behind importing and managing
+                 the list of instructions is so that the program can easily resume where it left off.  The set of
+                 "todo" items gets checked off as the program successfully provisions each device and this information
+                 persists even if you quit and then restart the program.
                  
                  The provision operation supports only DHCP, while provision-list can setup devices with either
                  DHCP or static IP addresses.  Either operation can additionally command each newly provisioned
@@ -199,12 +210,18 @@ def help_features( more = None ):
                  given it is on the local WiFi network.  The "flash" operation instructs local devices to take
                  an OTA firmware update.
 
-                 Additionally, existing devices on the local WiFi network can be probed using the "probe-list" command
-                 to discover all of their settings and status.  For battery-powered devices that are only periodically
-                 available on the network, the option --access=Periodic lets probe-list run for an extended period of 
-                 time looking frequently for the devices.  A powerful "query" operation can report on any information 
-                 found in the probe.  The "apply" operation allows programming the discovered devices with OTA firmware 
-                 updates, as well as making arbitrary settings changes using the --url option.
+                 A database is maintained with all of the newly provisioned devices.  For an end-user provisioning 
+                 devices for use on a local network, the database is tremendously useful for tracking the devices,
+                 managing settings and performing OTA updates.
+
+                 For existing devices on the local WiFi network that weren't provisioned using the tool, there is a
+                 "probe-list" command to discover their settings and status.  For battery-powered devices that are 
+                 only periodically available on the network, the option --access=Periodic lets probe-list run for an 
+                 extended period of time looking frequently for the devices.  
+
+                 A powerful "query" operation can report on any information recorded during provisioning or found using
+                 the probe operation.  An "apply" operation allows programming the discovered devices with OTA firmware 
+                 updates, as well as making arbitrary settings changes using the --settings and --url options.
 
                  An "identify" operation is available to continually toggle on/off a light or relay, given an IP
                  address, in order to aid in identifying a device.  Useful, for instance, with multiple light bulbs
@@ -730,9 +747,8 @@ def example_provision_3():
              The two settings, TZ and LatLng are separated by a comma.  Each setting has multiple parts, separated by
              colons (:).  TZ has the components tz_dst:tz_dst_auto:tz_utc_offset:tzautodetect, specifying whether
              daylight saving time is active, whether it is automatically set, the offset from UTC, and whether the
-             timezone is detected automatically.
-
-             LatLng is the latitude and longitude, separated by a colon: 30.33658:-97.77775
+             timezone is detected automatically.  LatLng is the latitude and longitude, separated by a colon: 
+                 30.33658:-97.77775
           """ )
 
 def example_provision_list_1( ):
@@ -758,8 +774,10 @@ def example_provision_list_1( ):
                  192.168.1.121,192.168.1.254,255.255.192.0,True:True:-14401:False,30.33658:-97.77775,TestNet,aasfni4fs43f
                  192.168.1.122,192.168.1.254,255.255.192.0,True:True:-14401:False,30.33658:-97.77775,TestNet,aasfni4fs43f
                  192.168.1.123,192.168.1.254,255.255.192.0,True:True:-14401:False,30.33658:-97.77775,TestNet,aasfni4fs43f
-             
           """ )
+
+## TODO: Now do dd-wrt based provision-list operation...
+
 
 def example_factory_reset_1():
     print("""
@@ -792,30 +810,63 @@ def example_import_1():
     print("""
              Example import-1
              --------------------------
-          """ )
+             Use import to append instructions to the "to-do" list of what needs to be provisioned, prior to running provision-list.  The
+             input file can be formatted as csv or JSON.  The entire list of available attributes (columns) is listed when you use 
+             "help import".
 
-def example_ddwrt_learn_1():
-    print("""
-             Example ddwrt-learn-1
-             -------------------------------
+                 $ python automagic.py help import
+
+                 $ vi my-device-list.csv
+                   ...
+
+                 $ python automagic.py import -f my-device-list.csv
+
+                 $ python automagic.py list
+                 <to-do list is displayed>
+
           """ )
 
 def example_list_1():
     print("""
              Example list-1
              ------------------------
+             The list operation is used to see what instructions for provision-list (or probe-list) are pending or have been completed.
+
+                 $ python automagic.py list -g Set1
+                 Group Set1 has no list entries ready to provision. Use import to specify some provisioning instructions.
+
+                 List of devices for probe-list or provision-list operation
+                 Group SSID    Password     StaticIP      NetMask       Gateway       InsertTime    CompletedTime
+                 ----- ------- ------------ ------------- ------------- ------------- ------------- -------------
+                 Set1  TestNet aasfni4fs43f 192.168.1.121 255.255.192.0 192.168.1.254 1627513668.29 1627513754.31
+                 Set1  TestNet aasfni4fs43f 192.168.1.122 255.255.192.0 192.168.1.254 1627513668.29
+                 Set1  TestNet aasfni4fs43f 192.168.1.123 255.255.192.0 192.168.1.254 1627513668.29
+
+             The first entry, 192.168.1.121, has been completed, indicated by the value in the CompletedTime column. The other two
+             entries are to-be-done.  The "-g Set1" option instructed the "list" operation to display only instructions in the group
+             "Set1".  See "help import" to see how to specify groups.
           """ )
 
 def example_clear_list_1():
     print("""
              Example clear-list-1
              ------------------------------
+             Use "clear-list" to erase the pending instructions in the to-do list:
+
+                 $ python automagic.py clear-list
+
           """ )
 
 def example_print_sample_1():
     print("""
              Example print-sample-1
              --------------------------------
+          """ )
+
+def example_ddwrt_learn_1():
+    print("""
+             Example ddwrt-learn-1
+             -------------------------------
           """ )
 
 def example_probe_list_1():
@@ -1600,7 +1651,7 @@ def fail_msg( s ):
 #   Library Functions
 ####################################################################################
 
-def check_for_device_queue( dq, group = None, include_complete = False, ssid = None ):
+def check_for_device_queue( dq, group = None, include_complete = False, ssid = None, fail = True ):
     txt = " for SSID " + ssid if ssid else ""
     txt += ". Use import to specify some provisioning instructions."
     if len( dq ) == 0:
@@ -1615,7 +1666,8 @@ def check_for_device_queue( dq, group = None, include_complete = False, ssid = N
         print( "Group " + group + " has no list entries ready to provision" + txt )
     else:
         print( "List has no entries ready to provision" + txt )
-    sys.exit()
+    print( )
+    if fail: sys.exit()
 
 def short_heading( c ):
     return c if re.search( '\.[0-9]+\.', c ) else re.sub( '.*\.', '', c )
@@ -2458,10 +2510,10 @@ def append_list( l ):
         device_queue.append( r )
 
 def print_list( queue_file, group ):
-    check_for_device_queue( device_queue, group )
+    check_for_device_queue( device_queue, group, fail=False )
 
     print( "List of devices for probe-list or provision-list operation" )
-    header = [ 'ProbeIP', 'Group', 'SSID', 'Password', 'StaticIP', 'NetMask', 'Gateway', 'DeviceName', 'InsertTime' ]
+    header = [ 'ProbeIP', 'Group', 'SSID', 'Password', 'StaticIP', 'NetMask', 'Gateway', 'DeviceName', 'InsertTime', 'CompletedTime' ]
     col_widths = [ 0 ] * len(header)
     result = [ header, [] ]
     for d in device_queue:
@@ -2676,7 +2728,7 @@ def main():
         return
 
     if args.operation == 'features':
-        print_features( )
+        help_features( )
         return
 
     if args.operation in [ 'ddwrt-learn' ] and args.ddwrt_name and len( args.ddwrt_name ) > 1:
