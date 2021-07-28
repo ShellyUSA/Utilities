@@ -51,7 +51,7 @@
 ######################################################################################################################
 #
 #  TODO:
-#            Allow omission of password in import (or a placeholder like "tbd") so it can work with single SSID/pw mode
+#            To document: Allow omission of password in import (or a placeholder like "tbd") so it can work with single SSID/pw mode
 #            of list-provision, where no DD-WRT device is specified.
 #            Check Shelly firmware version (for LATEST)
 #            OTA update settings/status after complete (or fix this)
@@ -61,6 +61,7 @@
 #            mDNS discovery?
 #            OTA from local webserver
 #            --ota-version-check=required|skip|try (in case redirect/forwarding would fail)
+#            display choices of old fw versions from the archive page
 #
 #            apply-list(?)  to apply --settings or --url to probe-list devices, instead of db
 #            Simplify some python2/3 compatibility per: http://python-future.org/compatible_idioms.html
@@ -122,7 +123,7 @@ required_keys = [ 'SSID', 'Password' ]
 optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName', 'LatLng', 'TZ', 'Access' ]
 default_query_columns = [ 'type', 'Origin', 'IP', 'ID', 'fw', 'has_update', 'settings.name' ] 
 
-all_operations = ( 'help','features','provision-list','provision','factory-reset','flash','import', 'ddwrt-learn','list', 'clear-list','print-sample','probe-list', 'query', 'apply', 'schema', 'identify', 'replace' )
+all_operations = ( 'help','features','provision','provision-list','factory-reset','flash','import', 'ddwrt-learn','list', 'clear-list','print-sample','probe-list', 'query', 'apply', 'schema', 'identify', 'replace' )
 
 exclude_setting = [ 'unixtime', 'fw', 'time', 'hwinfo', 'build_info', 'device', 'ison', 'has_timer', 'power', 'connected',
         'ext_humidity','ext_switch','ext_sensors','ext_temperature',    #TODO  -- parameter
@@ -153,7 +154,7 @@ labelprinting = None
 #   Help subsystem
 ####################################################################################
 
-def help_features( ):
+def help_features( more = None ):
     print(dedent(""" 
                  Features:
 
@@ -214,7 +215,7 @@ def help_features( ):
                  replacement device.
                  """) )
 
-def help_operations( ):
+def help_operations( more = None ):
     print(dedent(""" 
                  usage: python automagic.py [options] OPERATION
 
@@ -249,17 +250,17 @@ def help_operations( ):
                 """))
 
 
-def more_help( ):
+def more_help( more = None ):
     print(dedent(""" 
 
                  More help is available for each operation above. Try "help provision" or "help features".
                  You can also try "help all".
                 """))
 
-def help_commands( ):
+def help_commands( more = None ):
     help_operations( )
 
-def help_help( ):
+def help_help( more = None ):
     print(dedent(""" 
                  help
                  ----
@@ -267,7 +268,7 @@ def help_help( ):
                  To see all help, try "help all".  An overview of the program's functionalities is available too: "help features".
                 """))
 
-def help_provision( ):
+def help_provision( more = None ):
     print(dedent(""" 
                  provision
                  ---------
@@ -279,7 +280,7 @@ def help_provision( ):
                                                  confirm it is the proper one...  Make sure it is a 2.4GHz network and the same one the
                                                  computer is using.
 
-                     --wait-time                 Time to wait on each pass looking for new devices, 0 for just once
+                     --time-to-wait (-w)         Time to wait on each pass looking for new devices, 0 for just once
 
                      --ota PATH                  Apply OTA update of firmware after provisioning. PATH should specify an http path to
                                                  the firmware, or "LATEST".
@@ -304,7 +305,7 @@ def help_provision( ):
                                                  DeviceName, LatLng, TZ
                 """))
 
-def help_provision_list( ):
+def help_provision_list( more = None ):
     print(dedent(""" 
                  provision-list
                  --------------
@@ -372,7 +373,7 @@ def help_provision_list( ):
                                                  attributes: DeviceName, LatLng, TZ
                 """))
 
-def help_ddwrt_learn( ):
+def help_ddwrt_learn( more = None ):
     print(dedent(""" 
                  ddwrt-learn
                  -----------
@@ -403,7 +404,7 @@ def help_ddwrt_learn( ):
                      --ddwrt-password (-p)       Root password for dd-wrt device.  (required)
                 """))
 
-def help_import( ):
+def help_import( more = None ):
     print(dedent(""" 
                  import
                  ------
@@ -468,7 +469,7 @@ def help_import( ):
                                                  devices which take much longer to discover.
                 """))
 
-def help_list( ):
+def help_list( more = None ):
     print(dedent(""" 
                  list
                  ----
@@ -479,14 +480,14 @@ def help_list( ):
                                                  If --group/-g is not specified, ALL imported instructions will be listed.
                 """))
 
-def help_clear_list( ):
+def help_clear_list( more = None ):
     print(dedent(""" 
                  clear-list
                  ----------
                  Erase the entire list of pending operations.
                 """))
 
-def help_probe_list( ):
+def help_probe_list( more = None ):
     print(dedent(""" 
                  probe-list
                  ----------
@@ -507,7 +508,7 @@ def help_probe_list( ):
                                                  using the import command.
                 """))
 
-def help_query( ):
+def help_query( more = None ):
     print(dedent(""" 
                  query
                  -----
@@ -532,7 +533,7 @@ def help_query( ):
                      --refresh                   Refresh status and settings stored in the device DB for queried devices.
                 """))
 
-def help_schema( ):
+def help_schema( more = None ):
     print(dedent(""" 
                  schema
                  ------
@@ -549,7 +550,7 @@ def help_schema( ):
                      --match-tag                 Limit the schema operation to devices with a selected tag.
                 """))
 
-def help_apply( ):
+def help_apply( more = None ):
     print(dedent(""" 
                  apply
                  -----
@@ -599,7 +600,7 @@ def help_apply( ):
                      --access Periodic|ALL|Co... Only apply changes to devices that with Access=Continuous (default), Periodic, or ALL
                 """))
 
-def help_factory_reset( ):
+def help_factory_reset( more = None ):
     print(dedent(""" 
                  factory-reset
                  -------------
@@ -608,7 +609,7 @@ def help_factory_reset( ):
                      --device-address (required) Address or DNS name of target device
                 """))
 
-def help_identify( ):
+def help_identify( more = None ):
     print(dedent(""" 
                  identify
                  --------
@@ -617,7 +618,7 @@ def help_identify( ):
                      --device-address (required) Address or DNS name of target device
                 """))
 
-def help_flash( ):
+def help_flash( more = None ):
     print(dedent(""" 
                  flash  
                  -----
@@ -634,7 +635,7 @@ def help_flash( ):
                      --time-to-pause (-p)        Time to pause after various provisioning steps
                 """))
 
-def help_print_sample( ):
+def help_print_sample( more = None ):
     print(dedent(""" 
                  print-sample
                  ------------
@@ -647,7 +648,7 @@ def help_print_sample( ):
                                                          print( repr( dev_info ) )
                 """))
 
-def help_replace( ):
+def help_replace( more = None ):
     print(dedent(""" 
                  replace
                  -------
@@ -659,6 +660,250 @@ def help_replace( ):
                      python automagic.py apply --restore 537B3C3F8823
           
                 """))
+
+def example_provision_1():
+    print("""
+             Example provision-1
+             -------------------
+             Use the simple "provision" operation to find all new (or freshly reset to factory state) devices
+             and add them on the current network:
+
+
+                 $ python automagic.py provision --time-to-wait 300 --cue
+
+                 Found current SSID BP-AUX. Please be sure this is a 2.4GHz network before proceeding.
+                 Connect devices to SSID BP-AUX? (Y/N)> y
+                 Waiting to discover a new device
+                 Ready to provision shelly1-28a752 with {'SSID': None, 'InProgressTime': 1627415508.664647}
+                 Confirmed device shelly1-28a752 on BP-AUX network
+                 Press <enter> to continue
+
+                 Waiting to discover a new device
+                 ^C
+
+                 Attempting to reconnect to BP-AUX after failure or control-C
+
+             With the --time-to-wait option set (instead of the default 0) the program will wait up to 300s,
+             (5 minutes) for another device to appear in the factory reset state.  The default behavior looks
+             just once for any other devices before quitting.
+
+             The --cue option added the "Press <enter> to continue" feature shown above.  Omit it if you don't
+             need the program to wait on user interaction.  Without it you can plug in a number of new devices
+             and have each one automatically provisioned.
+          """ )
+
+def example_provision_2():
+    print("""
+             Example provision-2
+             -------------------
+             Both provision and provision-list include the ability to print out labels as each device is 
+             provisioned, and to toggle the device's relay to help identify which device was just set up:
+
+                 $ python automagic.py provision --toggle --print-using custom_label
+
+             With that "--toggle" feature, you'll hear each device go "click-click-click" after provisioning
+             is complete.  The program waits until the device is unplugged before looking for another 
+             device to configure.
+
+             Here's an example of the structure of the custom_label.py program referenced above.  This version
+             wouldn't actually print a label, but would instead use pythons "repr" feature to display all of
+             the available attributes.
+
+                 $ cat custom_label.py
+                 def make_label( dev_info ):
+                     print( repr( dev_info ) )
+
+             See also: "help print sample"
+          """ )
+
+def example_provision_3():
+    print("""
+             Example provision-3
+             -------------------
+             Though the provision command isn't as sophisticated as provision-list, there are features to do
+             addtional setup beyond just making the WiFi connection to each new device.  Attributes like timezone
+             and latitude/longitude which are likely to be the same on many devices can be provided with the 
+             --settings option:
+
+                 $ python automagic.py provision --settings TZ=True:True:-14401:False,LatLng=30.33658:-97.77775
+
+             The two settings, TZ and LatLng are separated by a comma.  Each setting has multiple parts, separated by
+             colons (:).  TZ has the components tz_dst:tz_dst_auto:tz_utc_offset:tzautodetect, specifying whether
+             daylight saving time is active, whether it is automatically set, the offset from UTC, and whether the
+             timezone is detected automatically.
+
+             LatLng is the latitude and longitude, separated by a colon: 30.33658:-97.77775
+          """ )
+
+def example_provision_list_1( ):
+    print("""
+             Example provision-list-1
+             ------------------------
+             The provision-list operation uses an imported set of operations in order to provide different configuration
+             information for a series of devices as they are discovered and configured.  It builds on the functionality
+             seen using the simpler "provision" operation.  It takes at least two steps to make use of the enhanced
+             capabilities:
+
+                 $ python automagic.py import -f my-device-list.csv
+
+                 $ python provision-list
+
+             The instructions imported from the file my-device-list.csv are carried out, in order, and applied to each
+             device that is detected by the provision-list operation.
+
+             Here's an example of what data could be found in the example my-device-list.csv above:
+
+                 $ cat my-device-list.csv
+                 StaticIP,Gateway,NetMask,TZ,LatLng,SSID,Password
+                 192.168.1.121,192.168.1.254,255.255.192.0,True:True:-14401:False,30.33658:-97.77775,TestNet,aasfni4fs43f
+                 192.168.1.122,192.168.1.254,255.255.192.0,True:True:-14401:False,30.33658:-97.77775,TestNet,aasfni4fs43f
+                 192.168.1.123,192.168.1.254,255.255.192.0,True:True:-14401:False,30.33658:-97.77775,TestNet,aasfni4fs43f
+             
+          """ )
+
+def example_factory_reset_1():
+    print("""
+             Example factory-reset-1
+             -----------------------
+             The factory-reset feature is pretty self-explanatory.  It's a easy way to reset a device if you need to start
+             over with the provisioning process:
+
+                 $ python automagic.py factory-reset -a 192.168.1.121
+          """ )
+
+def example_flash_1():
+    print("""
+             Example flash-1
+             ---------------
+             With the flash operation, you can upgrade the firmware of a device.  For multiple devices see the "apply"
+             operation.
+
+                 $ python automagic.py flash --device-address 192.168.1.121 --ota LATEST
+
+
+             The LATEST keyword requests the latest firmware.  You can provide a specific version with an http address,
+             instead:
+
+                 $ python automagic.py flash --device-address 192.168.1.121 --ota http://archive.shelly-tools.de/version/v1.1.10/SHSW-1.zip
+
+          """ )
+
+def example_import_1():
+    print("""
+             Example import-1
+             --------------------------
+          """ )
+
+def example_ddwrt_learn_1():
+    print("""
+             Example ddwrt-learn-1
+             -------------------------------
+          """ )
+
+def example_list_1():
+    print("""
+             Example list-1
+             ------------------------
+          """ )
+
+def example_clear_list_1():
+    print("""
+             Example clear-list-1
+             ------------------------------
+          """ )
+
+def example_print_sample_1():
+    print("""
+             Example print-sample-1
+             --------------------------------
+          """ )
+
+def example_probe_list_1():
+    print("""
+             Example probe-list-1
+             ------------------------------
+          """ )
+
+def example_query_1():
+    print("""
+             Example query-1
+             -------------------------
+          """ )
+
+def example_apply_1():
+    print("""
+             Example apply-1
+             -------------------------
+          """ )
+
+def example_schema_1():
+    print("""
+             Example schema-1
+             --------------------------
+          """ )
+
+def example_identify_1():
+    print("""
+             Example identify-1
+             ----------------------------
+          """ )
+
+def example_replace_1():
+    print("""
+             Example replace-1
+             ---------------------------
+          """ )
+
+def help_example( more = None ):
+    if not more:
+        print( "To recall a specific example: ")
+        print( "help example <operation>_n" ) 
+        print( "     ex: help example provision-list-1" )
+        print( )
+    else:
+        try:
+            eval( 'example_' + more.replace('-','_') + '(  )' )
+        except:
+            print( "There is no example titled " + more )
+            print( )
+
+def help_examples( more = None, need_prompt = False ):
+    no_example = ( 'help', 'features' )
+    if not more:
+        print( "This will step through examples for all operations, stopping between each one.  To look at examples for a specific " )
+        print( "operation try 'help examples <operation>'.  Additionally, you can recall a specific example with: ")
+        print( "help example <operation>_n" ) 
+        print( "     ex: help example provision-list-1" )
+        print( )
+        print( )
+        for e in all_operations:
+            if e not in no_example:
+                #print( e )
+                #print( '-' * len( e ) )
+                if not help_examples( e, need_prompt ):
+                    return False
+                need_prompt = True
+    else:
+        n = 1
+        found_any = False
+        while n > 0:
+            f = 'example_' + more.replace('-','_') + '_' + str( n )
+            call = f + '(  )'
+            if need_prompt and f in globals( ):
+                answer = input( 'Continue?' )
+                if answer and answer.upper() not in ('Y','YES'):
+                    return False
+            try:
+                eval( call )
+                print( )
+                found_any = True
+                need_prompt = True
+                n += 1
+            except:
+                n = 0
+        if not found_any:
+            help_example( more )
+    return True
 
 def help_docs( what ):
     if not what:
@@ -683,11 +928,14 @@ def help_docs( what ):
         help_print_sample( )
         help_replace( )
     else:
+        arg = '"""' + what[ 1 ] + '"""' if len( what ) > 1 else "None"
         try:
-            eval( 'help_' + what[0].replace('-','_') + '()' )
+            eval( 'help_' + what[0].replace('-','_') + '( ' + arg + ' )' )
+        except KeyboardInterrupt as error:
+            pass
         except:
             print( "No help for " + what[0] )
-            print( "Try: help operations, or one of " + ', '.join( all_operations ) )
+            print( "Try: help operations, help examples, or one of help... " + ', '.join( all_operations ) )
 
 ####################################################################################
 #   Python 2/3 compatibility functions
@@ -840,11 +1088,13 @@ def mac_init( ):
 
 def mac_get_cred():
     ssid = os_stash['iface'].ssid()
-    pw = subprocess.check_output( """security find-generic-password -ga """ + ssid + """ 2>&1 1>/dev/null | sed -e 's/password: "//' -e 's/"$//'""", shell=True ).rstrip()
+    print( "You will be prompted for your password in order to get WiFi credentials from the current " + ssid + " network.  Press <escape> to abort." )
+    time.sleep( .5 )
+    pw = subprocess.check_output( """security find-generic-password -ga """ + ssid + """ 2>&1 1>/dev/null | sed -e 's/password: "//' -e 's/"$//'""", shell=True ).rstrip().decode("ascii")
     if pw == '':
         print( "Could not get wifi password" )
         sys.exit()
-    return {'profile' : ssid, 'ssid' : ssid, 'password' : pw.decode("ascii") }
+    return {'profile' : ssid, 'ssid' : ssid, 'password' : pw }
 
 def mac_wifi_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
     passes = 0
@@ -1439,7 +1689,7 @@ def finish_up_device( device, rec, operation, args, new_version, initial_status,
     if not configured_settings: configured_settings = get_url( device, args.pause_time, args.verbose, get_settings_url( device, rec ), 'to get config' )
     rec[ 'status' ] = initial_status
     rec[ 'settings' ] = configured_settings if configured_settings else {}
-    print( "in finish_up_device: " + repr( initial_status ) )
+
     device_db[ initial_status[ 'mac' ] ] = rec
     write_json_file( args.device_db, device_db )
 
@@ -1978,7 +2228,7 @@ def provision_native( credentials, args, new_version ):
         if setup_count > 0 and args.cue:
             prompt_to_continue()
         setup_count += 1
-        sys.stdout.write( "Waiting to discover a new device" )
+        print( "Waiting to discover a new device" )
 
         init()
         t1 = timeit.default_timer()
@@ -2046,7 +2296,7 @@ def provision_native( credentials, args, new_version ):
 
         else:
             if args.wait_time == 0:
-                print("Exiting. No additional devices found and wait-time is 0. Set non-zero wait-time to poll for multiple devices.")
+                print("Exiting. No additional devices found and time-to-wait is 0. Set non-zero time-to-wait to poll for multiple devices.")
                 break
             if args.verbose > 0:
                 print( 'Found no new devices. Waiting ' + str(args.wait_time) + ' seconds before looking again. Press ^C to cancel' )
@@ -2288,11 +2538,16 @@ def factory_reset( device_address, verbose ):
 #   Option validation
 ####################################################################################
 
-def validate_options( vars ):
+def validate_options( p, vars ):
     op = vars[ 'operation' ]
     incompatible = []
 
-    allow = { "help" : [ ],
+    # options/parameters with defaults, or universally allowed
+    always = [ 'access', 'operation', 'ddwrt_file', 'pause_time', 'ota_timeout', 'device_db', 
+               'prefix', 'device_queue', 'verbose', 'force_platform' ]
+
+    # options allowed with specific commands
+    allow = { "help" : [ "what" ],
               "query" : [ "query_conditions", "query_columns", "group", "set_tag", "match_tag", "delete_tag", "refresh" ],
               "schema" : [ "query_conditions", "query_columns", "group", "match_tag", "refresh" ],
               "apply" : [ "query_conditions", "query_columns", "group", "set_tag", "match_tag", "delete_tag", 
@@ -2304,6 +2559,7 @@ def validate_options( vars ):
               "clear-list" : [ ]
             }
 
+    # required options for specific commands
     require = { "factory-reset" : [ "device_address" ],
                 "identify" : [ "device_address" ],
                 "flash" : [ "device_address", "ota" ],
@@ -2313,13 +2569,16 @@ def validate_options( vars ):
                 "print-sample" : [ "print_using" ]
               }
 
+    if op != 'help' and vars[ 'what' ]:
+        p.error( "unrecognized arguments: " + " ".join( vars[ 'what' ] ) )
+
     for r in require:
          if r in allow:
              allow[ r ].extend( require[ r ] )
          else:
              allow[ r ] = require[ r ]
 
-    for z in [ v for v in vars if vars[ v ] and v not in ( 'what', 'access', 'operation', 'ddwrt_file', 'pause_time', 'ota_timeout', 'device_db', 'prefix', 'device_queue', 'verbose' ) ]:
+    for z in [ v for v in vars if vars[ v ] and v not in always ]:
         if z not in allow[ op ]:
             incompatible.append( z.replace( "_", "-" ) )
     if len( incompatible ) > 1:
@@ -2402,7 +2661,7 @@ def main():
             print( 'Or,... "python automagic.py --help" will give a brief description of all options.' )
         sys.exit()
 
-    validate_options( vars( args ) )
+    validate_options( p, vars( args ) )
 
     new_version = None
 
@@ -2450,12 +2709,12 @@ def main():
         wifi_reconnect = pc_wifi_reconnect
         init = noop
         get_cred = pc_get_cred
-    elif sys.platform == 'linux':
+    elif platform == 'linux':
         if args.operation == 'provision':
-            print( "provision operation is not yet supported with linux. Use provision-list instead." )
+            print( "Provision operation is not yet supported with linux. Use provision-list with --ddwrt-name/-N instead." )
             return
         if args.operation in [ 'provision-list' ] and not args.ddwrt_name:
-            p.error( "with linux, the provision-list operation requires one or two --ddwrt-name (-N) options" )
+            print( "With linux, the provision-list operation requires one or two --ddwrt-name (-N) options" )
             return
     else:
         print( "Unsupported OS: " + sys.platform )
@@ -2514,7 +2773,7 @@ def main():
         except SystemExit:
             return
         except:
-            print( "Attempting to reconnect to " + credentials['ssid'] + " after failure" )
+            print( "Attempting to reconnect to " + credentials['ssid'] + " after failure or control-C" )
             wifi_reconnect( credentials )
             raise
 
@@ -2560,7 +2819,6 @@ def main():
     elif args.operation == 'replace':
         replace_device( args.device_db, args.from_device, args.to_device )
 
-
 if __name__ == '__main__':
     try:
         compatibility()
@@ -2569,7 +2827,6 @@ if __name__ == '__main__':
         pass
     except KeyboardInterrupt as error:
         pass
-
 
 ### examples of GUI interaction with DD-WRT device
 ###   curl --referer http://192.168.1.1/Management.asp -d submit_button=Management -d action=Reboot -u admin:password --http1.1 -v http://192.168.1.1/apply.cgi
