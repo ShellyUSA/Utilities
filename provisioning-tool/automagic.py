@@ -43,7 +43,7 @@
 #            fixed some python3 compatibility issues
 #            re-fetch settings after device name changes in provision_native()/provision_ddwrt()
 #            added identify operation
-#            added --restore option to apply
+#            added --restore-device option to apply
 #            added Gateway to import column options
 #            better query columns expansion e.g. wifi_sta.gw will now match settings.wifi_sta.gw
 #            added replace operation
@@ -51,9 +51,9 @@
 ######################################################################################################################
 #
 #  TODO:
-#            include "done" in "list" operation
-#            store Brand=Shelly
+#            store config outputs (UpdateTime, etc.) under ConfigOutputs
 #            store config inputs (TZ,LatLng,DeviceName,...) under ConfigInputs in JSON tree
+#
 #            option to flash: --downgrade
 #                  display choices of old fw versions from the archive page
 #                        http://archive.shelly-tools.de/archive.php           --> yields types
@@ -61,8 +61,8 @@
 #                        http://192.168.1.1/ota?url=http://archive.shelly-tools.de/version/v1.1.10/SH2LED-1.zip
 #            To document: Allow omission of password in import (or a placeholder like "tbd") so it can work with single SSID/pw mode
 #            of list-provision, where no DD-WRT device is specified.
-#            Check Shelly firmware version (for LATEST)
-#            OTA update settings/status after complete (or fix this)
+#            Check Shelly firmware version (for LATEST) by querying https://api.shelly.cloud/files/firmware
+#            OTA to update settings/status after complete (or fix this if its not working)
 #
 #  NICE-TO-HAVES:
 #            Insure it's a 2.4GHz network
@@ -131,7 +131,7 @@ optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP',
 default_query_columns = [ 'type', 'Origin', 'IP', 'ID', 'fw', 'has_update', 'settings.name' ] 
 
 all_operations = ( 'help', 'features', 'provision', 'provision-list', 'factory-reset', 'flash', 'import', 'list', 'clear-list', 
-                   'ddwrt-learn', 'print-sample', 'probe-list', 'query', 'apply', 'schema', 'identify', 'replace' )
+                   'ddwrt-learn', 'print-sample', 'probe-list', 'query', 'schema', 'apply', 'identify', 'replace' )
 
 exclude_setting = [ 'unixtime', 'fw', 'time', 'hwinfo', 'build_info', 'device', 'ison', 'has_timer', 'power', 'connected',
         'ext_humidity','ext_switch','ext_sensors','ext_temperature',    #TODO  -- parameter
@@ -670,11 +670,11 @@ def help_replace( more = None ):
                  replace
                  -------
                  Can be used to copy the settings in the device database from one device to another.  It only affects the settings in
-                 the database.  After completing the replace operation, use the --restore option to the apply operation, in order to 
+                 the database.  After completing the replace operation, use the --restore-device option to the apply operation, in order to 
                  reprogram the replacement device.
 
                      python automagic.py replace --from-device 7FB210446B27 --to-device 537B3C3F8823
-                     python automagic.py apply --restore 537B3C3F8823
+                     python automagic.py apply --restore-device 537B3C3F8823
           
                 """))
 
@@ -691,7 +691,7 @@ def example_provision_1():
                  Found current SSID BP-AUX. Please be sure this is a 2.4GHz network before proceeding.
                  Connect devices to SSID BP-AUX? (Y/N)> y
                  Waiting to discover a new device
-                 Ready to provision shelly1-28a752 with {'SSID': None, 'InProgressTime': 1627415508.664647}
+                 Ready to provision shelly1-28a752 with { ... }
                  Confirmed device shelly1-28a752 on BP-AUX network
                  Press <enter> to continue
 
@@ -755,7 +755,7 @@ def example_provision_list_1( ):
     print("""
              Example provision-list-1
              ------------------------
-             The provision-list operation uses an imported set of operations in order to provide different configuration
+             The provision-list operation uses an imported set of instructions in order to provide different configuration
              information for a series of devices as they are discovered and configured.  It builds on the functionality
              seen using the simpler "provision" operation.  It takes at least two steps to make use of the enhanced
              capabilities:
@@ -809,7 +809,7 @@ def example_flash_1():
 def example_import_1():
     print("""
              Example import-1
-             --------------------------
+             ----------------
              Use import to append instructions to the "to-do" list of what needs to be provisioned, prior to running provision-list.  The
              input file can be formatted as csv or JSON.  The entire list of available attributes (columns) is listed when you use 
              "help import".
@@ -829,7 +829,7 @@ def example_import_1():
 def example_list_1():
     print("""
              Example list-1
-             ------------------------
+             --------------
              The list operation is used to see what instructions for provision-list (or probe-list) are pending or have been completed.
 
                  $ python automagic.py list -g Set1
@@ -850,7 +850,7 @@ def example_list_1():
 def example_clear_list_1():
     print("""
              Example clear-list-1
-             ------------------------------
+             --------------------
              Use "clear-list" to erase the pending instructions in the to-do list:
 
                  $ python automagic.py clear-list
@@ -860,49 +860,239 @@ def example_clear_list_1():
 def example_print_sample_1():
     print("""
              Example print-sample-1
-             --------------------------------
+             ----------------------
+             The provision and provision-list operations support an option to print labels to identify each device as it is 
+             provisioned.  Printing is handled by a user-supplied python program.  Use "print-sample" to test the printing
+             program:
+
+                 $ python automagic.py print-sample --print-using custom_label
+
+             The information sent to the user-supplied program will include a JSON attribute { "TestPrint": True }, in 
+             addition to sample attributes similar to what an actual provisioned device will included.
           """ )
 
 def example_ddwrt_learn_1():
     print("""
              Example ddwrt-learn-1
-             -------------------------------
+             ---------------------
+             One or two DD-WRT routers can be used to speed up the provision-list operation.  The DD-WRT routers must be
+             detected and "learned" by the program before use by provision-list.  Learning the DD-WRT routers is accomplished
+             using "ddwrt-learn":
+
+                 $ python automagic.py ddwrt-learn --ddwrt-name DEV1 --ddwrt-address 192.168.1.224 --ddwrt-password TempPassWd
+
+             Each of the options, --ddwrt-name, --ddwrt-address, and --ddwrt-password are required.  The --ddwrt-name option is 
+             used to supply a name for the router being learned.  It will be referenced in provision-list operations to follow.
+
+             --ddwrt-address specifies the IP address of the DD-WRT router to be detected and learned.
+             --ddwrt-password is the root password used to connect to the router using telnet.
           """ )
 
 def example_probe_list_1():
     print("""
              Example probe-list-1
-             ------------------------------
+             --------------------
+             The program maintains a database of all devices set up using the provision and provision-list commands.  It is also 
+             possible to add devices to the database by probing existing devices on your local network.  Supply the device IP
+             addresses using the "import" operation, specifying a "ProbeIP" attribute, then run "probe-list":
+
+                 $ python automagic.py import -f my-probe-list.csv
+
+                 $ python automagic.py probe-list
+                   ...
+
+                 $ cat my-probe-list.csv
+                 ProbeIP
+                 192.168.1.121
+                 192.168.1.122
+                 192.168.1.123
+                
           """ )
 
 def example_query_1():
     print("""
              Example query-1
-             -------------------------
-          """ )
+             ---------------
+             To query the database built from all of the provisioned and probed devices, use the query operation:
 
-def example_apply_1():
-    print("""
-             Example apply-1
-             -------------------------
+                 $ python automagic.py query
+
+             With no other options, query will show all of the devices and certain default attributes on each line:
+
+                 type     Origin         IP             ID           fw                                   has_update name
+                 -------- -------------- -------------- ------------ ------------------------------------ ---------- --------------------
+                 SHSW-PM  probe-list     192.168.252.11 98xxxxxxx126 20210323-105928/v1.10.1-gf276b51     False      fern_bed_water
+                 SHRGBW2  probe-list     192.168.53.6   B4xxxxxxx98B 20201019-101619/v1.9.0-rc1@04ed984d  True       rgbw-fence-right
+                 SHBDUO-1 probe-list     192.168.53.3   98xxxxxxxFD9 20210429-100125/v1.10.4-g3f94cd7     True       None
+                 SHBDUO-1 probe-list     192.168.53.9   98xxxxxxxC5A 20210429-100125/v1.10.4-g3f94cd7     True       None
+                 SHHT-1   probe-list     192.168.54.1   3Cxxxxxxx39F 20201124-091711/v1.9.0@57ac4ad8      False      None
+                 SHSW-1   provision-list 192.168.1.121  ECxxxxxxx751 20210429-100340/v1.10.4-g3f94cd7     False      None               
+
+             You can modify the list of displayed columns with the -q option:
+
+                 $ python automagic.py query -q type,fw,settings.name
+
+             Each column is actually a path that traverses JSON objects, and matches the first or most explicit attribute.  In the 
+             example above, settings.name is a different attribute than just "name".  More on the paths and attributes is explained
+             in example-schema-1
+
+             The records displayed must match any name-value pairs passed to the -Q option:
+
+                 $ python automagic.py query -q IP,type -Q type=SHBDUO-1
+                 IP             type
+                 -------------- --------
+                 192.168.53.1   SHBDUO-1
+                 192.168.53.2   SHBDUO-1
+                 192.168.53.3   SHBDUO-1
+                 192.168.53.9   SHBDUO-1
           """ )
 
 def example_schema_1():
     print("""
              Example schema-1
-             --------------------------
+             ----------------
+             The schema operation is used to explore the JSON data and paths which are available to the query and apply operations. The
+             organization of the data is dynamically assembled from the devices that are provisioned and/or probed.  Try:
+
+                 $ python automagic.py schema -vv
+
+             This will output many lines of data similar to the following:
+
+                 status.temperature_status:
+                     status.temperature_status [ SHSW-PM, SHSW-25 ]
+
+             This indicates that devices of type SHSW-PM and SHSW-25 both provide data in the JSON read from the device in the form...
+
+                 "status": {
+                     "temperature_status": "Normal",...
+                 }
+
+             The term status.temperature_status can be used with the query operation in either -q or -Q options.
+
+                 $ python automagic.py query -Q status.temperature_status=Normal
+
+             If temperature_status is unique (found only in one place, under the status object) then this is equivalent:
+
+                 $ python automagic.py query -Q status.temperature_status=Normal
+
+             The -q option works with the schema operator, too, limiting the output to only attributes that match:
+
+                 $ python automagic.py schema -vv -q state
+                 settings.rollers.0.state:
+                     settings.rollers.[n].state [ SHSW-21, SHSW-25 ]
+                 state:
+                     status.valves.[n].state [ SHGS-1 ]
+                     settings.rollers.[n].state [ SHSW-21, SHSW-25 ]
+                 status.valves.0.state:
+                     status.valves.[n].state [ SHGS-1
+          """ )
+
+def example_apply_1():
+    print("""
+             Example apply-1
+             ---------------
+             You can use the "apply" operator to make modifications to devices that match query parameters in the device database.  For example,
+             performing an OTA update to all SHSW-1 devices:
+
+                 $ python automagic.py apply -Q type=SHSW-1 --ota=LATEST --dry-run
+
+             With the --dry-run option, the above command wouldn't actually perform the updates, but instead shows the steps it would perform.
+
+             Other options available with apply include --settings and --url.  More information is available using "help apply".  Note that
+             without the -Q option to limit this OTA update to only one device type, it would be applied to every device in the device DB.
+          """ )
+
+def example_apply_2():
+    print("""
+             Example apply-2
+             ---------------
+             Use the --settings option with the apply operation in order to change the name, timezone, or latitude/longitude of one
+             or more devices:
+
+                 $ python automagic.py apply -Q ID=7FB210446B27 --settings TZ=True:True:-14401:False,LatLng=30.33658:-97.77775
+
+             As with --ota, there's an option, --dry-run, to see what changes would be made without actually applying them.  Here we
+             show -Q using the ID (mac address) of a specific device to insure the apply operation affects it only.
+          """ )
+
+def example_apply_3():
+    print("""
+             Example apply-3
+             ---------------
+             With the --url option, the apply operation can control or configure any device(s) in any way imaginable.  The --url option 
+             takes a parameter which is an url fragment to be appended after http://<device-address>/.  Using direct knowledge of the 
+             device's web API, construct 
+
+                 $ python automagic.py apply -Q ID=7FB210446B27 --url "relay/0/?turn=on" -vv
+
+             With the -vv option you can also see the responses from the device(s).
+          """ )
+
+def example_apply_4():
+    print("""
+             Example apply-4
+             ---------------
+             The apply operation can be used to restore settings on a device using the settings stored in the device DB.  In this example
+             we first refresh the stored information using query --refresh, then generate all of the URLs which would restore the device's
+             state using apply --restore-device:
+
+
+                 $ python automagic.py query -Q ID=7FB210446B27 --refresh
+                 Refreshing info from network devices
+                 type     Origin         IP             ID           fw                                   has_update name
+                 -------- -------------- -------------- ------------ ------------------------------------ ---------- --------------------
+                 SHSW-1   probe-list     192.168.51.1   7FB210446B27 20210415-125832/v1.10.3-g23074d0     True       counter_lights
+
+             Then...
+
+                 $ python automagic.py apply --restore-device 84F3EB9F5C4D --dry-run
+                 type     Origin         IP             ID           fw                                   has_update name
+                 -------- -------------- -------------- ------------ ------------------------------------ ---------- --------------------
+                 SHSW-1   probe-list     192.168.51.1   84F3EB9F5C4D 20210415-125832/v1.10.3-g23074d0     True       counter_lights
+
+                 http://192.168.51.1/settings/cloud?connected=False&enabled=False
+                 http://192.168.51.1/settings/ap_roaming?threshold=-70&enabled=False
+                 http://192.168.51.1/settings/?sntp_server=time.google.com
+                 http://192.168.51.1/settings/?mqtt_enable=True&mqtt_reconnect_timeout_min=2.0&mqtt_upd...
+                 <snip>
+
+             In reality, 20 more lines of output would be displayed, including all of the device's "action" URLs.  Of course, remove
+             the --dry-run, and this would actually apply all of the updates to the device, rather than just displaying them.
+
+             Note that the --restore-device option takes a mandatory argument with the device's ID (mac address).  This is to insure that
+             the user definitely intends to affect the specific device chosen.  Another option is to use -Q to choose a set of devices, and
+             --restore-device ALL, which overrides the protection that otherwise limits the operation to a single device:
+
+                 $ python automagic.py apply --restore-device ALL --Q type=SHSW-1
+
+             This would restore the configuration of every Shelly 1 found in the device DB.
+
           """ )
 
 def example_identify_1():
     print("""
              Example identify-1
-             ----------------------------
+             ------------------
+             The identify operation turns a light or relay on/off repeatedly to help identify which device is at the specified address.
+             The -a option is required:
+
+                 $ python automagic.py identify -a 192.168.51.1
+
+             The device will continue flashing until the identify operation is terminated with ^C (control-C) or the device becomes 
+             unreachable (unplugged or disconnected from the network).
           """ )
 
 def example_replace_1():
     print("""
              Example replace-1
-             ---------------------------
+             -----------------
+             The replace operation copies settings in the device database from one device to another.  Note that it only affects the device
+             DB.  To complete the process of configuring a new device to replace an old one requires subsequently using --restore-device and
+             the apply operation.
+
+
+                 $ python automagic.py replace --from-device 7FB210446B27 --to-device 537B3C3F8823
+                 $ python automagic.py apply --restore-device 537B3C3F8823
           """ )
 
 def help_example( more = None ):
@@ -1417,16 +1607,22 @@ def print_label( dev_info ):
 def test_print( ):
     dev_info = {
             "Group": "foo",
+            "Brand": "Shelly",
+            "IP": "192.168.33.1",
+            "ID": "ECFABC746290",
+            "TestPrint": True,
             "Label": "Las Vegas, NV. Store #45",
-            "Origin": "provision-list",
             "SSID": "TestNet",
             "Password": "12xyzab34",
             "StaticIP": "192.168.1.22",
             "NetMask": "255.255.192.0",
-            "factory_ssid": "shelly1-746290",
-            "InProgressTime": 1625598429.713981,
-            "CompletedTime": 1625598447.571315,
-            "ConfirmedTime": 1625598447.6824908,
+            "ConfigStatus" : {
+                "Origin": "provision-list",
+                "factory_ssid": "shelly1-746290",
+                "InProgressTime": 1625598429.713981,
+                "CompletedTime": 1625598447.571315,
+                "ConfirmedTime": 1625598447.6824908,
+            },
             "status": {
                 "wifi_sta": {
                     "connected": False,
@@ -1529,13 +1725,14 @@ def read_json_file( f, empty, validate = False ):
                 if type( empty ) != type( result ):
                     valid = False
                 elif type( result ) == type( {} ):
-                    if 'format' not in result or result[ 'format' ] != 'automagic':
+                    if 'Format' not in result or result[ 'Format' ] != 'automagic':
                         valid = False
                 elif type( result ) == type( [] ) and len( result ) >= 1:
                     valid = False
-                    for v in validate:
-                        if v in result[0]:
-                            valid = True
+                    if 'ConfigInput' in result[0]:
+                        for v in validate:
+                            if v in result[0]['ConfigInput']:
+                                valid = True
             if not valid:
                 print( "File " + f + " was not written by this program, or is corrupt." )
                 sys.exit()
@@ -1655,12 +1852,13 @@ def check_for_device_queue( dq, group = None, include_complete = False, ssid = N
     txt = " for SSID " + ssid if ssid else ""
     txt += ". Use import to specify some provisioning instructions."
     if len( dq ) == 0:
-        print( "List is empty. " + txt )
+        print( "List is empty" + txt )
         sys.exit()
     for rec in dq:
-        if ( include_complete or 'CompletedTime' not in rec ) and \
-           ( not group or 'Group' in rec and rec[ 'Group' ] == group ) and \
-           ( not ssid or 'SSID' in rec and rec[ 'SSID' ] == ssid ):
+        if 'ConfigInput' not in rec or 'ConfigStatus' not in rec: continue
+        if ( include_complete or 'CompletedTime' not in rec['ConfigStatus'] ) and \
+           ( not group or 'Group' in rec[ 'ConfigInput' ] and rec[ 'ConfigInput' ][ 'Group' ] == group ) and \
+           ( not ssid or 'SSID' in rec[ 'ConfigInput' ] and rec[ 'ConfigInput' ][ 'SSID' ] == ssid ):
             return
     if group:
         print( "Group " + group + " has no list entries ready to provision" + txt )
@@ -1683,7 +1881,7 @@ def get_name_value_pairs( query_conditions, term_type = '--query-condition' ):
 def complete_probe( args, rec, initial_status = None ):
     global device_db
 
-    ip_address = rec[ 'ProbeIP' ]
+    ip_address = rec[ 'ConfigInput' ][ 'ProbeIP' ]
     if not args.refresh or args.operation == 'probe-list': eprint( ip_address )
     if not initial_status:
         initial_status = get_url( ip_address, args.pause_time, args.verbose, status_url( ip_address ), 'to get current status' )
@@ -1698,15 +1896,16 @@ def complete_probe( args, rec, initial_status = None ):
         if id in device_db:
             rec.update( device_db[ id ] )
         else:
-            rec['ProbeTime'] = time.time()
-        rec['UpdateTime'] = time.time()
+            rec['ConfigStatus']['ProbeTime'] = time.time()
+        rec['ConfigStatus']['UpdateTime'] = time.time()
         rec['status'] = initial_status
         if configured_settings:
             rec['settings'] = configured_settings
-            rec['CompletedTime'] = time.time()
+            rec['ConfigStatus']['CompletedTime'] = time.time()
         else:
             print( "Failed to update settings for " + id )
-        rec['Origin'] = 'probe-list'
+        rec['ConfigStatus']['Origin'] = 'probe-list'
+        rec['Brand'] = 'Shelly'
         rec['IP'] = ip_address
         rec['ID'] = id
         device_db[ id ] = rec
@@ -1724,7 +1923,7 @@ def import_csv( file, queue_file ):
 
 def finish_up_device( device, rec, operation, args, new_version, initial_status, configured_settings = None ):
     global device_db
-    rec[ 'ConfirmedTime' ] = time.time()
+    rec[ 'ConfigStatus' ][ 'ConfirmedTime' ] = time.time()
     #need_update = False
 
     settings = get_name_value_pairs( args.settings, term_type = '--settings' )
@@ -1733,12 +1932,13 @@ def finish_up_device( device, rec, operation, args, new_version, initial_status,
             if pair[0] not in rec:
                 rec[ pair[0] ] = pair[1]
 
-    rec[ 'Origin' ] = operation
+    rec[ 'ConfigStatus' ][ 'Origin' ] = operation
+    rec[ 'Brand' ] = 'Shelly'
     rec[ 'ID' ] = initial_status[ 'mac' ]
     rec[ 'IP' ] = initial_status[ 'wifi_sta' ][ 'ip' ]
 
     rec = copy.deepcopy( rec )
-    if not configured_settings: configured_settings = get_url( device, args.pause_time, args.verbose, get_settings_url( device, rec ), 'to get config' )
+    if not configured_settings: configured_settings = get_url( device, args.pause_time, args.verbose, get_settings_url( device, rec['ConfigInput'] ), 'to get config' )
     rec[ 'status' ] = initial_status
     rec[ 'settings' ] = configured_settings if configured_settings else {}
 
@@ -1773,15 +1973,23 @@ def finish_up_device( device, rec, operation, args, new_version, initial_status,
 def read_device_queue( dq, args, ssid ):
     if args.operation == 'provision-list':
         for rec in device_queue:
-            if 'SSID' not in rec:
+            if 'ConfigInput' not in rec:
                 continue
-            if 'CompletedTime' in rec or args.group and ( not 'Group' in rec or rec[ 'Group' ] != args.group ) or \
-                ssid and ssid != rec[ 'SSID' ]:
+            cfg = rec[ 'ConfigInput' ]
+            if 'ConfigStatus' in rec and 'CompletedTime' in rec['ConfigStatus'] in rec or args.group and \
+                ( not 'Group' in cfg or cfg[ 'Group' ] != args.group ) or \
+                ssid and ssid != cfg[ 'SSID' ]:
                 continue
+            if 'ConfigStatus' not in rec: rec[ 'ConfigStatus' ] = {}
+            rec[ 'ConfigStatus' ][ 'InProgressTime' ] = time.time()
             yield rec
     else:
         while True:
             rec = { 'SSID' : ssid }
+            rec[ 'ConfigStatus' ] = {}
+            rec[ 'ConfigStatus' ][ 'InProgressTime' ] = time.time()
+            rec[ 'ConfigInput' ] = {}
+            rec[ 'ConfigInput' ][ 'SSID' ] = ssid
             yield rec
 
 def prompt_to_continue( ):
@@ -1947,7 +2155,7 @@ def schema( args ):
     if args.refresh: probe_list( args )
 
     for d in device_db:
-        if d == 'format':
+        if d == 'Format':
             continue
         ( data, new_guide ) = flatten( device_db[ d ] )
         if match_rec( data, query_conditions, args.match_tag, args.group, None, args.access ):
@@ -1984,9 +2192,9 @@ def apply( args, new_version, data, need_write ):
     if args.apply_urls:
         for url in args.apply_urls:
             if args.dry_run:
-                print( 'http://' + data[ 'IP' ] + url )
+                print( 'http://' + data[ 'IP' ] + '/' + url )
             else:
-                got = get_url( data[ 'IP' ], args.pause_time, args.verbose, 'http://' + data[ 'IP' ] + url, 'to apply ' + url )
+                got = get_url( data[ 'IP' ], args.pause_time, args.verbose, 'http://' + data[ 'IP' ] + '/' + url, 'to apply /' + url )
                 if not args.settings:
                     configured_settings = get_url( data[ 'IP' ], args.pause_time, args.verbose, get_settings_url( data[ 'IP' ] ), 'to get config' )
                     need_write = True
@@ -2093,7 +2301,7 @@ def query( args, new_version = None ):
     guide = {}
     tmp = []
     for d in device_db:
-        if d == 'format':
+        if d == 'Format':
             continue
         ( data, new_guide ) = flatten( device_db[ d ] )
         guide.update( new_guide )
@@ -2172,6 +2380,7 @@ def query( args, new_version = None ):
 
         done = []
         passes = 0
+        configured_settings = None
         while( todo ):
             passes += 1
             for ( result, res, data ) in todo:
@@ -2208,13 +2417,13 @@ def query( args, new_version = None ):
 def probe_list( args ):
     query_conditions = [ x.split('=') for x in args.query_conditions.split(',') ] if args.query_conditions else []
     if args.refresh:
-        dq = [ device_db[ k ] for k in device_db.keys() if 'ProbeIP' in device_db[ k ] ]
+        dq = [ device_db[ k ] for k in device_db.keys() if 'ProbeIP' in device_db[ k ][ 'ConfigInput' ] ]
     else:
         dq = device_queue
 
     todo = []
     for rec in dq:
-        if match_rec( rec, query_conditions, args.match_tag, args.group, None, args.access ) and 'ProbeIP' in rec: 
+        if match_rec( rec, query_conditions, args.match_tag, args.group, None, args.access ) and 'ProbeIP' in rec['ConfigInput']: 
             todo.append( rec )
 
     if not args.refresh:
@@ -2228,22 +2437,30 @@ def probe_list( args ):
     need_write = False
     # todo: Look for Periodic-type devices in queue and message that it might take a while
     while len( todo ):
-        #sys.stdout.write( "." )
-        #sys.stdout.flush()
+        if args.operation == 'probe-list' and not args.verbose:
+            sys.stdout.write( "." )
+            sys.stdout.flush()
         for rec in todo:
-            if need_write and ( probe_count % 10 == 0 or 'Access' in rec and rec[ 'Access' ] == 'Periodic' ):
+            cfg = rec[ 'ConfigInput' ]
+            if need_write and ( probe_count % 10 == 0 or 'Access' in cfg and cfg[ 'Access' ] == 'Periodic' ):
                 write_json_file( args.device_db, device_db )
             initial_status = None
             try:
-                initial_status = json.loads( url_read( status_url( rec[ 'ProbeIP' ] ), tmout = 0.5 ) )
+                initial_status = json.loads( url_read( status_url( cfg[ 'ProbeIP' ] ), tmout = 0.5 ) )
                 break
-            except:
-                pass
+            except BaseException as e:
+                if isinstance( e, socket.timeout ) or isinstance( e.reason, socket.timeout ) or str( e.reason ) in (
+                       '[Errno 64] Host is down',
+                       '[Errno 61] Connection refused' ):
+                    pass
+                else:
+                    eprint( "Unexpected error [A]:", str( e.reason ) )  ### sys.exc_info( )[0] )
+                    sys.exit()
         if initial_status:
-            done.append( rec )
-            complete_probe( args, rec, initial_status )
-            need_write = True
-            probe_count += 1
+             done.append( rec )
+             complete_probe( args, rec, initial_status )
+             need_write = True
+             probe_count += 1
         time.sleep( 0.5 )
         todo = [ r for r in todo if r not in done ]
 
@@ -2276,7 +2493,8 @@ def provision_native( credentials, args, new_version ):
     init()
     setup_count = 0
     success_count = 0
-    for rec in read_device_queue( device_queue, args, None ):
+    for rec in read_device_queue( device_queue, args, ssid ):
+        cfg = rec[ 'ConfigInput' ]
         if setup_count > 0 and args.cue:
             prompt_to_continue()
         setup_count += 1
@@ -2286,10 +2504,8 @@ def provision_native( credentials, args, new_version ):
         t1 = timeit.default_timer()
         found = wifi_connect( credentials, args.prefix, prefix=True, ignore_ssids=prior_ssids, verbose=args.verbose )
         if found:
-            rec[ 'InProgressTime' ] = time.time()
-
             if args.timing: print( 'discover time: ', round( timeit.default_timer() - t1, 2 ) )
-            print( "Ready to provision " + found + " with " + repr( rec ) )
+            print( "Ready to provision " + found + " with " + repr( cfg ) )
             prior_ssids[ found ] = 1
             time.sleep( args.pause_time )
             if not get_status( factory_device_addr, args.pause_time, args.verbose ):
@@ -2297,8 +2513,7 @@ def provision_native( credentials, args, new_version ):
                     print( "Could not reconnect to " + ssid )
                 break
 
-            rec[ 'factory_ssid' ] = found
-            rec[ 'InProgressTime' ] = time.time()
+            rec[ 'ConfigStatus' ][ 'factory_ssid' ] = found
             write_json_file( args.device_queue, device_queue )
 
             got_one = False
@@ -2308,8 +2523,8 @@ def provision_native( credentials, args, new_version ):
                 # Load the URL three times, even if we are successful the first time
                 for j in range(3):
                     try:
-                        if args.operation == 'provision-list' and 'StaticIP' in rec:
-                            req = set_settings_url( factory_device_addr, ssid, pw, rec[ 'StaticIP'], rec[ 'NetMask' ], rec[ 'Gateway' ] )
+                        if args.operation == 'provision-list' and 'StaticIP' in cfg:
+                            req = set_settings_url( factory_device_addr, ssid, pw, cfg[ 'StaticIP'], cfg[ 'NetMask' ], cfg[ 'Gateway' ] )
                         else:
                             req = set_settings_url( factory_device_addr, ssid, pw, None, None, None )
 
@@ -2318,7 +2533,7 @@ def provision_native( credentials, args, new_version ):
                             print( repr( content ) )
                         got_one = True
                     except:
-                        if not got_one: eprint( "Unexpected error:", sys.exc_info( )[0] )
+                        if not got_one: eprint( "Unexpected error [B]:", sys.exc_info( )[0] )
                 if got_one: break
             if not got_one:
                 print( "Tried 15 times and could not instruct device to set up network" )
@@ -2328,12 +2543,12 @@ def provision_native( credentials, args, new_version ):
             if not wifi_reconnect( credentials ):
                 print( "Could not reconnect to " + ssid )
                 break
-            rec[ 'CompletedTime' ] = time.time()
+            rec[ 'ConfigStatus' ][ 'CompletedTime' ] = time.time()
             success_count += 1
             write_json_file( args.device_queue, device_queue )
 
-            if 'StaticIP' in rec:
-                ip_address = rec[ 'StaticIP' ]
+            if 'StaticIP' in cfg:
+                ip_address = cfg[ 'StaticIP' ]
             else:
                 ip_address = found
 
@@ -2363,6 +2578,7 @@ def provision_ddwrt( args, new_version ):
     setup_count = 0
     success_count = 0
     for rec in read_device_queue( device_queue, args, None ):
+        cfg = rec[ 'ConfigInput' ]
         if setup_count > 0 and args.cue:
             prompt_to_continue()
         setup_count += 1
@@ -2375,9 +2591,9 @@ def provision_ddwrt( args, new_version ):
             if len( device_ssids ) > 0:
                 if args.timing: print( 'discover time: ', round( timeit.default_timer() - t1, 2 ) )
                 print( "" )
-                print( "Ready to provision " + device_ssids[0] + " with " + repr( rec ) )
-                rec[ 'factory_ssid' ] = device_ssids[0]
-                rec[ 'InProgressTime' ] = time.time()
+                print( "Ready to provision " + device_ssids[0] + " with " + repr( cfg ) )
+                rec[ 'ConfigStatus' ][ 'factory_ssid' ] = device_ssids[0]
+                rec[ 'ConfigStatus' ][ 'InProgressTime' ] = time.time()
                 write_json_file( args.device_queue, device_queue )
 
                 attempts = 0
@@ -2386,7 +2602,7 @@ def provision_ddwrt( args, new_version ):
                     # With different ddwrt devices, faster to pre-configure AP
                     t1 = timeit.default_timer()
                     if ap_node[ 'router' ][ 'et0macaddr' ] != sta_node[ 'router' ][ 'et0macaddr' ]:
-                        ddwrt_set_ap_mode( ap_node, rec[ 'SSID' ], rec[ 'Password' ] )
+                        ddwrt_set_ap_mode( ap_node, cfg[ 'SSID' ], cfg[ 'Password' ] )
 
                     ddwrt_set_sta_mode( sta_node, device_ssids[0] )
                     if args.timing: print( 'dd-wrt device configuration time: ', round( timeit.default_timer() - t1, 2 ) )
@@ -2397,10 +2613,10 @@ def provision_ddwrt( args, new_version ):
                     initial_status = json.loads( response[0] )
 
                     t1 = timeit.default_timer()
-                    if 'StaticIP' in rec:
-                        url = set_settings_url( factory_device_addr, rec[ 'SSID' ], rec[ 'Password' ], rec[ 'StaticIP'], rec[ 'NetMask' ], rec[ 'Gateway' ] )
+                    if 'StaticIP' in cfg:
+                        url = set_settings_url( factory_device_addr, cfg[ 'SSID' ], cfg[ 'Password' ], cfg[ 'StaticIP'], cfg[ 'NetMask' ], cfg[ 'Gateway' ] )
                     else:
-                        url = set_settings_url( factory_device_addr, rec[ 'SSID' ], rec[ 'Password' ], None, None, None )
+                        url = set_settings_url( factory_device_addr, cfg[ 'SSID' ], cfg[ 'Password' ], None, None, None )
                     ( result, err ) = ddwrt_wget( sta_node, url, args.verbose, None, 5 )
                     ###LOG### print( result )
                     if args.timing: print( 'settings time: ', round( timeit.default_timer() - t1, 2 ) )
@@ -2436,17 +2652,17 @@ def provision_ddwrt( args, new_version ):
                 # If just one ddwrt device, then switch from sta back to AP now
                 if ap_node[ 'router' ][ 'et0macaddr' ] == sta_node[ 'router' ][ 'et0macaddr' ]:
                     t1 = timeit.default_timer()
-                    ddwrt_set_ap_mode( ap_node, rec[ 'SSID' ], rec[ 'Password' ] )
+                    ddwrt_set_ap_mode( ap_node, cfg[ 'SSID' ], cfg[ 'Password' ] )
                     if args.timing: print( 'dd-wrt device reconfig time: ', round( timeit.default_timer() - t1, 2 ) )
 
                 t1 = timeit.default_timer()
-                if 'StaticIP' in rec:
-                    ip_address = rec[ 'StaticIP' ]
+                if 'StaticIP' in cfg:
+                    ip_address = cfg[ 'StaticIP' ]
                 else:
                     ip_address = device_ssids[ 0 ]
 
                 msg = "Finding " + ip_address + " on new network"
-                ( response, err ) = ddwrt_wget( ap_node, get_settings_url( ip_address, rec ), args.verbose, msg, 40 )
+                ( response, err ) = ddwrt_wget( ap_node, get_settings_url( ip_address, cfg ), args.verbose, msg, 40 )
                 configured_settings = json.loads(response[0])
 
                 if args.timing: print( 'WiFi transition time:', round( timeit.default_timer() - t1, 2 ) )
@@ -2456,7 +2672,7 @@ def provision_ddwrt( args, new_version ):
                     sys.exit()
 
                 success_count += 1
-                rec[ 'CompletedTime' ] = time.time()
+                rec[ 'ConfigStatus' ][ 'CompletedTime' ] = time.time()
                 write_json_file( args.device_queue, device_queue )
 
                 if args.verbose > 1: print( repr( configured_settings ) )
@@ -2506,8 +2722,9 @@ def append_list( l ):
                         sys.exit( )
 
                 r[ k ] = row[ k ]
-        r[ 'InsertTime' ] = time.time()
-        device_queue.append( r )
+        if 'ProbeIP' in r: r['ProbeIP'] = r['ProbeIP'].strip()
+        t = { 'ConfigInput' : r, 'ConfigStatus' : { 'InsertTime' : time.time() } }
+        device_queue.append( t )
 
 def print_list( queue_file, group ):
     check_for_device_queue( device_queue, group, fail=False )
@@ -2517,10 +2734,10 @@ def print_list( queue_file, group ):
     col_widths = [ 0 ] * len(header)
     result = [ header, [] ]
     for d in device_queue:
-        if 'Group' in d and d['Group'] == group or not group:
+        if 'Group' in d['ConfigInput'] and d['Group']['ConfigInput'] == group or not group:
             rec = []
             for h in header:
-                rec.append( d[h] if h in d else '' )
+                rec.append( d['ConfigInput'][h] if h in d['ConfigInput'] else d['ConfigStatus'][h] if h in d['ConfigStatus'] else '' )
             result.append( rec )
             for i in range( len( header ) ):
                 if len( str( rec[i] ) ) > col_widths[i]:
@@ -2581,10 +2798,10 @@ def factory_reset( device_address, verbose ):
         print( "Reset sent to " + device_address )
     except BaseException as e:
         print( "Reset failed" )
-        if isinstance( e.reason, socket.timeout ) or str( e.reason ) == '[Errno 64] Host is down':
+        if isinstance( e, socket.timeout ) or isinstance( e.reason, socket.timeout ) or str( e.reason ) == '[Errno 64] Host is down':
             print( "Device is not reachable on your network" )
             return
-        print( "Unexpected error:", sys.exc_info( )[0] )
+        print( "Unexpected error [C]:", sys.exc_info( )[0] )
 
 ####################################################################################
 #   Option validation
@@ -2683,7 +2900,7 @@ def main():
     p.add_argument(       '--device-db', default='iot-devices.json', help='Device database file (default: iot-devices.json)' )
     p.add_argument(       '--ota', dest='ota', metavar='http://...|LATEST', default='', help='OTA firmware to update after provisioning, or with "flash" or "apply" operation' )
     p.add_argument( '-n', '--ota-timeout', metavar='SECONDS', default=300, type=int, help='Time in seconds to wait on OTA udpate. Default 300 (5 minutes). Use 0 to skip check (inadvisable)' )
-    p.add_argument(       '--url', dest='apply_urls', action='append', help='URL fragments to apply, i.e "/settings/?lat=31.366398&lng=-96.721352"' )
+    p.add_argument(       '--url', dest='apply_urls', action='append', help='URL fragments to apply, i.e "settings/?lat=31.366398&lng=-96.721352"' )
     p.add_argument(       '--cue', action='store_true', help='Ask before continuing to provision next device' )
     p.add_argument(       '--timing', action='store_true', help='Show timing of steps during provisioning' )
     p.add_argument( '-q', '--query-columns', help='Comma separated list of columns to output, start with "+" to also include all default columns, "-" to exclude specific defaults' )
@@ -2774,7 +2991,7 @@ def main():
 
     if args.ddwrt_name:
         router_db = read_json_file( args.ddwrt_file, {}, True )
-        router_db[ 'format' ] = 'automagic'
+        router_db[ 'Format' ] = 'automagic'
 
     if args.operation in ( 'import', 'provision-list', 'list', 'probe-list' ):
         device_queue = read_json_file( args.device_queue, [], ['SSID','ProbeIP'] )
@@ -2784,7 +3001,7 @@ def main():
         try:
             contents = url_read( args.ota, 'b', tmout=60 )
         except:
-             eprint( "Unexpected error:", sys.exc_info( )[0] )
+             eprint( "Unexpected error [D]:", sys.exc_info( )[0] )
              contents = None
         if not contents or not zipfile.is_zipfile( stringtofile( contents ) ):
             print( "Could not fetch OTA firmware" )
@@ -2806,7 +3023,7 @@ def main():
 
     if args.operation in [ 'provision-list', 'probe-list', 'query', 'apply', 'schema', 'provision', 'replace' ]:
         device_db = read_json_file( args.device_db, {}, True )
-        device_db[ 'format' ] = 'automagic'
+        device_db[ 'Format' ] = 'automagic'
 
     if args.operation == 'import':
         if not args.file:
