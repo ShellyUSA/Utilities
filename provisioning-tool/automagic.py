@@ -24,6 +24,9 @@
 #
 #  Changes:
 #
+# 1.0007     Attributes now stored under ConfigInput and ConfigStatus JSON objects instead of top-level.
+#            Checks Shelly firmware version (for LATEST) by querying https://api.shelly.cloud/files/firmware
+#
 # 1.0006     Now provision-list can work without dd-wrt devices, but only to program IoT devices onto the same
 #            WiFi network as the computer/laptop.  This allows other fields like Static IP and device name to be
 #            set during initial provisioning.  The provision-list operation is also compatible with --settings now.
@@ -51,8 +54,6 @@
 ######################################################################################################################
 #
 #  TODO:
-#            store config outputs (UpdateTime, etc.) under ConfigOutputs
-#            store config inputs (TZ,LatLng,DeviceName,...) under ConfigInputs in JSON tree
 #
 #            option to flash: --downgrade
 #                  display choices of old fw versions from the archive page
@@ -61,7 +62,6 @@
 #                        http://192.168.1.1/ota?url=http://archive.shelly-tools.de/version/v1.1.10/SH2LED-1.zip
 #            To document: Allow omission of password in import (or a placeholder like "tbd") so it can work with single SSID/pw mode
 #            of list-provision, where no DD-WRT device is specified.
-#            Check Shelly firmware version (for LATEST) by querying https://api.shelly.cloud/files/firmware
 #            OTA to update settings/status after complete (or fix this if its not working)
 #
 #  NICE-TO-HAVES:
@@ -70,7 +70,7 @@
 #            OTA from local webserver
 #            --ota-version-check=required|skip|try (in case redirect/forwarding would fail)
 #
-#            apply-list(?)  to apply --settings or --url to probe-list devices, instead of db
+#            new operation apply-list(?)  to apply --settings or --url to probe-list devices, instead of db
 #            Simplify some python2/3 compatibility per: http://python-future.org/compatible_idioms.html
 #            DeviceType -- limit provision-list to matching records -- provision-list to choose devices by DeviceType
 #            -U option to apply operation to make arbitray updates in device DB (for use prior to restore)
@@ -124,7 +124,7 @@ else:
     from StringIO import StringIO
     from urllib2 import HTTPError
 
-version = "1.0006"
+version = "1.0007"
 
 required_keys = [ 'SSID', 'Password' ]
 optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName', 'LatLng', 'TZ', 'Access' ]
@@ -142,6 +142,8 @@ exclude_setting = [ 'unixtime', 'fw', 'time', 'hwinfo', 'build_info', 'device', 
 exclude_from_copy = [ 'actions.names','alt_modes','build_info','calibrated','device.mac','device.hostname','device.num_emeters','device.num_inputs',
                       'device.num_meters','device.num_outputs','device.num_rollers','device.type','fw','hwinfo.batch_id','hwinfo.hw_revision',
                       'unixtime','settings.meters','settings.fw_mode','settings.login.default_username' ]
+
+ota_version_cache = None
 
 init = None
 wifi_connect = None
@@ -1679,7 +1681,7 @@ def url_encode( vals ):
         return urlencode( [ ( n, v ) if v != None else ( n, '' ) for ( n, v ) in vals ] ).replace( 'urls%5B%5D', 'urls[]' )
 
 def get_url( addr, tm, verbose, url, operation, tmout = 2 ):
-    for i in range( 5 ):
+    for i in range( 10 ):
         contents=""
         raw_data=""
         if verbose and operation != '':
@@ -1690,10 +1692,16 @@ def get_url( addr, tm, verbose, url, operation, tmout = 2 ):
             raw_data = url_read( url, tmout = tmout )
             contents = json.loads( raw_data )
         except HTTPError as e:
-            print('Error code:', e.code)
+            print('in get_url, Error code:', e.code)
             print( e.read( ) )
         except BaseException as e:
-            if verbose or i > 3: print( e )
+            if ( isinstance( e, socket.timeout ) or isinstance( e.reason, socket.timeout ) or str( e.reason ) in (
+                '[Errno 64] Host is down',
+                '[Errno 61] Connection refused',
+                'urlopen error timed out' ) ):
+               pass   ### ignore timeout
+            else:
+               if verbose or i > 3: print( 'error in get_url: here ' + repr( str( e ) ) )
        
         if contents:
             if verbose > 1:
@@ -1701,7 +1709,7 @@ def get_url( addr, tm, verbose, url, operation, tmout = 2 ):
             return contents
         time.sleep( tm )
 
-    print( "Failed five times to contact device at " + addr + ". Try increasing --time-to-pause option, or move device closer" )
+    print( "Failed ten times to contact device at " + addr + ". Try increasing --time-to-pause option, or move device closer" )
     if raw_data: print( "Raw results from last attempt: " + raw_data )
     return None
 
@@ -2088,6 +2096,7 @@ def print_details( col, paths, verbosity, max_width ):
 ####################################################################################
 
 def flash_device( addr, pause_time, verbose, ota, ota_timeout, new_version, dry_run ):
+    global ota_version_cache
     print( "Checking old firmware version" )
     url = "http://" + addr + "/ota"
     result = get_url( addr, pause_time, verbose, url, 'to get current version' )
@@ -2095,6 +2104,15 @@ def flash_device( addr, pause_time, verbose, ota, ota_timeout, new_version, dry_
         print( "Could not get current firmware version for device " + addr )
         return False
     print( "status: " + result['status'] + ", version: " + result['old_version'] )
+    if not new_version and ota == 'LATEST':
+        settings = get_url( addr, pause_time, verbose, get_settings_url( addr ), 'to get current device type' )
+        if not result:
+            print( "Could not get settings for device " + addr )
+            return False
+        dev_type = settings[ 'device' ][ 'type' ]
+        if not ota_version_cache:
+            ota_version_cache = settings = get_url( 'api.shelly.cloud', pause_time, verbose, 'https://api.shelly.cloud/files/firmware', 'to get current device type' )
+        new_version = ota_version_cache[ 'data' ][ dev_type ][ 'version' ]
     if result['old_version'] == new_version:
         print( "Device is already up-to-date" )
         return True
@@ -2103,7 +2121,7 @@ def flash_device( addr, pause_time, verbose, ota, ota_timeout, new_version, dry_
         return False
     if ota_flash( addr, pause_time, ota, verbose, dry_run ):
         print( "Sent OTA instructions to " + addr )
-        print( "New Version: " + repr( new_version ) )
+        print( "New version: " + new_version )
         if ota_timeout == 0: return True
         print( "Pausing to wait to check for successful OTA flash..." )
         start_time = time.time( )
@@ -2899,7 +2917,7 @@ def main():
     p.add_argument(       '--print-using', metavar='PYTHON-FILE', help='Python program file containing a function, "make_label", for labeling provisioned devices' )
     p.add_argument(       '--device-db', default='iot-devices.json', help='Device database file (default: iot-devices.json)' )
     p.add_argument(       '--ota', dest='ota', metavar='http://...|LATEST', default='', help='OTA firmware to update after provisioning, or with "flash" or "apply" operation' )
-    p.add_argument( '-n', '--ota-timeout', metavar='SECONDS', default=300, type=int, help='Time in seconds to wait on OTA udpate. Default 300 (5 minutes). Use 0 to skip check (inadvisable)' )
+    p.add_argument( '-n', '--ota-timeout', metavar='SECONDS', default=360, type=int, help='Time in seconds to wait on OTA udpate. Default 360 (6 minutes). Use 0 to skip check (inadvisable)' )
     p.add_argument(       '--url', dest='apply_urls', action='append', help='URL fragments to apply, i.e "settings/?lat=31.366398&lng=-96.721352"' )
     p.add_argument(       '--cue', action='store_true', help='Ask before continuing to provision next device' )
     p.add_argument(       '--timing', action='store_true', help='Show timing of steps during provisioning' )
@@ -3001,8 +3019,8 @@ def main():
         try:
             contents = url_read( args.ota, 'b', tmout=60 )
         except:
-             eprint( "Unexpected error [D]:", sys.exc_info( )[0] )
-             contents = None
+            eprint( "Unexpected error [D]:", sys.exc_info( )[0] )
+            contents = None
         if not contents or not zipfile.is_zipfile( stringtofile( contents ) ):
             print( "Could not fetch OTA firmware" )
             return
