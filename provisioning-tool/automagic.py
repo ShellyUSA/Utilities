@@ -1359,28 +1359,34 @@ def pc_get_cred():
     pw = pc_get_cmd_output( 'cmd /c "netsh wlan show profile name=' + ssid + ' key=clear | findstr Key"', 'Key Content', "Could not determine pasword for network " + ssid )
     return { 'profile' : ssid, 'ssid' : ssid, 'password' : pw }
 
-def pc_wifi_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
+def pc_wifi_connect( credentials, mstr, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
     if prefix:
         print( "Disconnecting from your WiFi to try to discover new SSIDs, because of Windows OS limitations. :-(" )
         # it's necessary to disconnect in order to have wlan show networks show all networks
         os.system('cmd /c "netsh wlan disconnect"')
-        time.sleep( 5 )
+        time.sleep( 5 )    # this sleep may have helped in finding devices which would be missed if show networks runs too soon
         show_networks = subprocess.check_output( 'cmd /c "netsh wlan show networks"', shell=True ).decode('utf8')
         network = None
         networks = re.findall( r'SSID .*', show_networks, re.MULTILINE )
         if verbose > 1: print(repr(networks))
+        skipped = 0
         for n in networks:
             if verbose > 1: print(repr(n))
-            m = re.search( 'SSID  *[0-9][0-9]*  *:  *(' + str + '.*)', n )
-            if m and m.group(1) != '' and m.group(1).rstrip() not in ignore_ssids:
-                network = m.group(1).rstrip()
-                break
+            m = re.search( 'SSID  *[0-9][0-9]*  *:  *(' + mstr + '.*)', n )
+            if m and m.group(1) != '':
+                if m.group(1).rstrip() not in ignore_ssids:
+                    network = m.group(1).rstrip()
+                    break
+                else:
+                    skipped += 1
 
         if not network:
+            if skipped and verbose:
+                print( "skipped " + str( skipped ) + " device(s) still showing up on network but previously processed" )
             os.system('cmd /c "netsh wlan connect name=' + credentials['profile'] + '"')
             return None
     else:
-        network = str
+        network = mstr
 
     pc_write_profile( network, tempfile.gettempdir() + r"\ntwrk_tmp.xml" )
     os.system('cmd /c "netsh wlan add profile filename=' + tempfile.gettempdir() + r'\ntwrk_tmp.xml user=all"')
@@ -1762,6 +1768,7 @@ def any_timeout_reason( e ):
            'reason' in dir( e ) and ( isinstance( e.reason, socket.timeout ) or \
                 str( e.reason ) in (
                     '[Errno 64] Host is down',
+                    'urlopen error [Errno 8] nodename nor servname provided, or not known',
                     '[Errno 61] Connection refused',
                     'urlopen error timed out' ) )
 
@@ -1783,7 +1790,7 @@ def get_url( addr, tm, verbose, url, operation, tmout = 2 ):
             if any_timeout_reason( e ):
                pass   ### ignore timeout
             else:
-               if verbose or i > 3: print( 'error in get_url: here ' + repr( str( e ) ) )
+               if verbose or i > 3: print( 'error in get_url: ' + repr( str( e ) ) )
        
         if contents:
             if verbose > 1:
@@ -1890,7 +1897,7 @@ def toggle_device( ip_address, dev_type, verbosity = 0 ):
                     print( "Toggle url: '" + url + "'" )
                 try:
                     result = url_read( url )
-                    use_type = try_type
+                    if result: use_type = try_type
                 except BaseException as e:
                     if verbosity > 1:
                         eprint( "Error in toggle_device:", sys.exc_info( )[0] )
@@ -1939,6 +1946,28 @@ def fail_msg( s ):
 ####################################################################################
 #   Library Functions
 ####################################################################################
+
+def get_firmware_version( ota ):
+    new_version = None
+    try:
+        contents = url_read( ota, 'b', tmout=60 )
+    except:
+        eprint( "Unexpected error [D]:", sys.exc_info( )[0] )
+        contents = None
+    if not contents or not zipfile.is_zipfile( stringtofile( contents ) ):
+        print( "Could not fetch OTA firmware" )
+        return
+    zip = zipfile.ZipFile( stringtofile( contents ) )
+    manifest = None
+    for z in zip.namelist():
+        if z.endswith('manifest.json'):
+            manifest = z
+            break
+    if manifest:
+        f = zip.open( manifest )
+        contents = json.loads( f.read( ).decode('utf8') )
+        new_version = contents[ 'build_id' ]
+    return new_version
 
 def check_for_device_queue( dq, group = None, include_complete = False, ssid = None, fail = True ):
     txt = " for SSID " + ssid if ssid else ""
@@ -2627,6 +2656,7 @@ def provision_native( credentials, args, new_version ):
             prior_ssids[ found ] = 1
             time.sleep( args.pause_time )
             if not get_status( factory_device_addr, args.pause_time, args.verbose ):
+                print( "Failed to contact device after connecting to its AP" )
                 if not wifi_reconnect( credentials ):
                     print( "Could not reconnect to " + ssid )
                 break
@@ -2636,6 +2666,7 @@ def provision_native( credentials, args, new_version ):
 
             got_one = False
             setup_count += 1
+            print( "Sending network credentials to device" )
             for i in range(5):
                 time.sleep( args.pause_time )
                 # Load the URL three times, even if we are successful the first time
@@ -2671,6 +2702,7 @@ def provision_native( credentials, args, new_version ):
             else:
                 ip_address = found
 
+            print( "Attempting to connect to device back on " + ssid )
             initial_status = get_status( ip_address, args.pause_time, args.verbose )
 
             if initial_status:
@@ -2903,7 +2935,8 @@ def list_versions( addr, pause_time, verbose ):
         return
     dev_type = settings[ 'device' ][ 'type' ]
 
-    versions = get_url( 'archive.shelly-tools.de' , pause_time, verbose, 'http://archive.shelly-tools.de/archive.php?type=' + dev_type, 'to get firmware list' )
+    url = "http://archive.shelly-tools.de/archive.php?type=" + dev_type
+    versions = get_url( 'archive.shelly-tools.de' , pause_time, verbose, url, 'to get firmware list' )
     hwidth = 0
     for v in versions:
         if len( v[ 'version' ] ) > hwidth: hwidth = len( v[ 'version' ] )
@@ -2911,7 +2944,11 @@ def list_versions( addr, pause_time, verbose ):
     versions.sort( key=lambda e : [ int( re.sub( r'[^0-9]', '', k ) ) for k in e[ 'version' ].split('.') ] )
 
     for v in versions:
-        print( v[ 'version' ].ljust( hwidth ) + "    " + ( "http://" + addr + "/ota?url=" if verbose else "" ) + "http://archive.shelly-tools.de/version/" + v[ 'version' ] + "/" + v[ 'file' ] )
+        url = "http://archive.shelly-tools.de/version/" + v[ 'version' ] + "/" + v[ 'file' ]
+        print( v[ 'version' ].ljust( hwidth ) + "    " + ( "http://" + addr + "/ota?url=" if verbose else "" ) + url )
+        if verbose > 5:
+            new_version = get_firmware_version( url )
+            print( "    " + new_version )
 
 def replace_device( db_path, from_device, to_device ):
     global device_db
@@ -3148,24 +3185,8 @@ def main():
 
     if args.ota and args.ota != 'LATEST':
         if args.verbose > 0: print( "Checking version of OTA firmware" )
-        try:
-            contents = url_read( args.ota, 'b', tmout=60 )
-        except:
-            eprint( "Unexpected error [D]:", sys.exc_info( )[0] )
-            contents = None
-        if not contents or not zipfile.is_zipfile( stringtofile( contents ) ):
-            print( "Could not fetch OTA firmware" )
-            return
-        zip = zipfile.ZipFile( stringtofile( contents ) )
-        manifest = None
-        for z in zip.namelist():
-            if z.endswith('manifest.json'):
-                manifest = z
-                break
-        if manifest:
-            f = zip.open( manifest )
-            contents = json.loads( f.read( ).decode('utf8') )
-            new_version = contents[ 'build_id' ]
+        new_version = get_firmware_version( args.ota )
+        if new_version:
             print( "OTA firmware build ID: " + new_version )
 
     if args.print_using:
