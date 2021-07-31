@@ -1360,8 +1360,10 @@ def pc_get_cred():
 
 def pc_wifi_connect( credentials, str, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
     if prefix:
+        print( "Disconnecting from your WiFi to try to discover new SSIDs, because of Windows OS limitations. :-(" )
         # it's necessary to disconnect in order to have wlan show networks show all networks
         os.system('cmd /c "netsh wlan disconnect"')
+        time.sleep( 5 )
         show_networks = subprocess.check_output( 'cmd /c "netsh wlan show networks"', shell=True ).decode('utf8')
         network = None
         networks = re.findall( r'SSID .*', show_networks, re.MULTILINE )
@@ -2570,8 +2572,10 @@ def acceptance_test( args, credentials ):
         if found:
             prior_ssids[ found ] = 1
             print( "Found " + found )
-            print( "Unplug device to try another" )
+            print( "Now attempting to toggle relay." )
+            print( "When you hear it click, you can unplug the device to try another" )
             toggle_device( "192.168.33.1", None )
+            print( )
             print( "Searching for another device" )
         else:
             print( "Failed to find device to test. Pausing for 15s to try again" )
@@ -3186,7 +3190,7 @@ def main():
             wifi_reconnect( credentials )
 
     elif args.operation in ( 'provision', 'config-test' ) or args.operation == 'provision-list' and not args.ddwrt_name:
-        if args.operation == 'config-test': args.wait_time = 999999
+        if args.operation == 'config-test' and not args.wait_time: args.wait_time = 15
         init( )
         credentials = get_cred( )
         try:
