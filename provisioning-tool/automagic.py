@@ -1884,8 +1884,11 @@ def toggle_device( ip_address, dev_type, verbosity = 0 ):
         # TODO: use dev_type to determine relay/light. For now, try both.
         for try_type in ( 'light', 'relay' ):
             if not use_type or use_type == try_type:
+                url = get_toggle_url( ip_address, try_type )
+                if verbosity:
+                    print( "Toggle url: '" + url + "'" )
                 try:
-                    result = url_read( get_toggle_url( ip_address, try_type ) )
+                    result = url_read( url )
                     use_type = try_type
                 except BaseException as e:
                     if verbosity > 1:
