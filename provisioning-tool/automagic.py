@@ -1745,7 +1745,7 @@ def test_print( ):
     print_label( dev_info )
 
 ####################################################################################
-#   HTTP Utilities
+#   HTTP / network Utilities
 ####################################################################################
 
 def url_encode( vals ):
@@ -1753,6 +1753,14 @@ def url_encode( vals ):
         return urlencode( dict( [ [ v, vals[ v ] if vals[ v ] != None else '' ] for v in vals ] ) ).replace( 'urls%5B%5D', 'urls[]' )
     else:
         return urlencode( [ ( n, v ) if v != None else ( n, '' ) for ( n, v ) in vals ] ).replace( 'urls%5B%5D', 'urls[]' )
+
+def any_timeout_reason( e ):
+    return isinstance( e, socket.timeout ) or \
+           'reason' in e and ( isinstance( e.reason, socket.timeout ) or \
+                str( e.reason ) in (
+                    '[Errno 64] Host is down',
+                    '[Errno 61] Connection refused',
+                    'urlopen error timed out' ) )
 
 def get_url( addr, tm, verbose, url, operation, tmout = 2 ):
     for i in range( 10 ):
@@ -1769,10 +1777,7 @@ def get_url( addr, tm, verbose, url, operation, tmout = 2 ):
             print('in get_url, Error code:', e.code)
             print( e.read( ) )
         except BaseException as e:
-            if ( isinstance( e, socket.timeout ) or isinstance( e.reason, socket.timeout ) or str( e.reason ) in (
-                '[Errno 64] Host is down',
-                '[Errno 61] Connection refused',
-                'urlopen error timed out' ) ):
+            if any_timeout_reason( e ):
                pass   ### ignore timeout
             else:
                if verbose or i > 3: print( 'error in get_url: here ' + repr( str( e ) ) )
@@ -2542,9 +2547,7 @@ def probe_list( args ):
                 initial_status = json.loads( url_read( status_url( cfg[ 'ProbeIP' ] ), tmout = 0.5 ) )
                 break
             except BaseException as e:
-                if isinstance( e, socket.timeout ) or isinstance( e.reason, socket.timeout ) or str( e.reason ) in (
-                       '[Errno 64] Host is down',
-                       '[Errno 61] Connection refused' ):
+                if any_timeout_reason( e ):
                     pass
                 else:
                     eprint( "Unexpected error [A]:", str( e.reason ) )  ### sys.exc_info( )[0] )
@@ -2561,16 +2564,18 @@ def probe_list( args ):
         write_json_file( args.device_db, device_db )
 
 def acceptance_test( args, credentials ):
+    prior_ssids = {}
     while True:
-        found = wifi_connect( None, args.prefix, prefix=True, ignore_ssids=[], verbose=args.verbose )
+        found = wifi_connect( credentials, args.prefix, prefix=True, ignore_ssids=prior_ssids, verbose=args.verbose )
         if found:
+            prior_ssids[ found ] = 1
             print( "Found " + found )
             print( "Unplug device to try another" )
             toggle_device( "192.168.33.1", None )
             print( "Searching for another device" )
         else:
-            print( "Failed to find device to test. Pausing for 5s to try again" )
-            time.sleep( 5 )
+            print( "Failed to find device to test. Pausing for 15s to try again" )
+            time.sleep( 15 )
 
 def provision_native( credentials, args, new_version ):
     global device_queue, device_db
@@ -2935,7 +2940,7 @@ def factory_reset( device_address, verbose ):
         print( "Reset sent to " + device_address )
     except BaseException as e:
         print( "Reset failed" )
-        if isinstance( e, socket.timeout ) or isinstance( e.reason, socket.timeout ) or str( e.reason ) == '[Errno 64] Host is down':
+        if any_timeout_reason( e ):
             print( "Device is not reachable on your network" )
             return
         print( "Unexpected error [C]:", sys.exc_info( )[0] )
