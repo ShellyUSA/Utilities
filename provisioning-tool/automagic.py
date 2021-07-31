@@ -24,6 +24,8 @@
 #
 #  Changes:
 #
+# 1.0008     Completed config-test feature
+#
 # 1.0007     Attributes now stored under ConfigInput and ConfigStatus JSON objects instead of top-level.
 #            Checks Shelly firmware version (for LATEST) by querying https://api.shelly.cloud/files/firmware
 #            Added acceptance-test feature (working) and config-test (work-in-progress)
@@ -2649,7 +2651,8 @@ def provision_native( credentials, args, new_version ):
                 break
             rec[ 'ConfigStatus' ][ 'CompletedTime' ] = time.time()
             success_count += 1
-            write_json_file( args.device_queue, device_queue )
+            if args.operation != 'config-test':
+                 write_json_file( args.device_queue, device_queue )
 
             if 'StaticIP' in cfg:
                 ip_address = cfg[ 'StaticIP' ]
@@ -2660,7 +2663,18 @@ def provision_native( credentials, args, new_version ):
 
             if initial_status:
                 print( "Confirmed device " + found + " on " + ssid + ' network' )
-                finish_up_device( ip_address, rec, args.operation, args, new_version, initial_status )
+                if args.operation == 'config-test':
+                    print( "Toggling device.  Use ^C (control-C) to continue" )
+                    try:
+                        toggle_device( ip_address, None )
+                    except:
+                        pass
+                    factory_reset( ip_address, None )
+                    answer = input( 'Remove device and connect another. Continue?' )
+                    if answer and answer.upper() not in ('Y','YES'):
+                        return False
+                else:
+                    finish_up_device( ip_address, rec, args.operation, args, new_version, initial_status )
             else:
                 print( "Could not find device on " + ssid + ' network' )
                 break
