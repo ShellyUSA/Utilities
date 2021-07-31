@@ -26,6 +26,7 @@
 #
 # 1.0007     Attributes now stored under ConfigInput and ConfigStatus JSON objects instead of top-level.
 #            Checks Shelly firmware version (for LATEST) by querying https://api.shelly.cloud/files/firmware
+#            Added acceptance-test feature (working) and config-test (work-in-progress)
 #
 # 1.0006     Now provision-list can work without dd-wrt devices, but only to program IoT devices onto the same
 #            WiFi network as the computer/laptop.  This allows other fields like Static IP and device name to be
@@ -55,11 +56,16 @@
 #
 #  TODO:
 #
-#            option to flash: --downgrade
+#
+#   #### D/W and H/T just not reporting sensor updates?????
+#
+#            per-device OTA flash versions ... instead of LATEST, OTAVersion|ApplyOTA|... (or something)
+#            
 #                  display choices of old fw versions from the archive page
 #                        http://archive.shelly-tools.de/archive.php           --> yields types
 #                        http://archive.shelly-tools.de/archive.php?type=SH2LED-1           --> yields versions
 #                        http://192.168.1.1/ota?url=http://archive.shelly-tools.de/version/v1.1.10/SH2LED-1.zip
+#            
 #            To document: Allow omission of password in import (or a placeholder like "tbd") so it can work with single SSID/pw mode
 #            of list-provision, where no DD-WRT device is specified.
 #            OTA to update settings/status after complete (or fix this if its not working)
@@ -131,7 +137,8 @@ optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP',
 default_query_columns = [ 'type', 'Origin', 'IP', 'ID', 'fw', 'has_update', 'settings.name' ] 
 
 all_operations = ( 'help', 'features', 'provision', 'provision-list', 'factory-reset', 'flash', 'import', 'list', 'clear-list', 
-                   'ddwrt-learn', 'print-sample', 'probe-list', 'query', 'schema', 'apply', 'identify', 'replace' )
+                   'ddwrt-learn', 'print-sample', 'probe-list', 'query', 'schema', 'apply', 'identify', 'replace', 'list-versions',
+                   'acceptance-test', 'config-test' )
 
 exclude_setting = [ 'unixtime', 'fw', 'time', 'hwinfo', 'build_info', 'device', 'ison', 'has_timer', 'power', 'connected',
         'ext_humidity','ext_switch','ext_sensors','ext_temperature',    #TODO  -- parameter
@@ -232,6 +239,12 @@ def help_features( more = None ):
                  The settings from one device can be copied to a new replacement device using the "replace" operation.
                  Having transfered the settings, it is then possible to use "apply" with --restore to reprovision the
                  replacement device.
+
+                 Use the "list-versions" operation to check the available archived versions of prior firmware for a device.
+
+                 The "acceptance-test" operation checks that devices can be contacted in AP mode (factory reset) and toggles 
+                 their relay, without provisioning them.  For a more complete test, choose "config-test" which provisions each 
+                 device, toggles their relay, and then returns them factory settings.
                  """) )
 
 def help_operations( more = None ):
@@ -262,6 +275,11 @@ def help_operations( more = None ):
                  apply              - apply --ota, --url and --settings to devices matching a query from the device database
                  identify           - toggle power on/off on a given device to identify (by ip-address)
                  replace            - copy the settings of one device to another in the device database
+
+                 list-versions      - list prior versions of firmware available for a given device, specified with --device-address (-a)
+
+                 acceptance-test    - checks that devices can be contacted, toggles their relay, to test basic functionality
+                 config-test        - provisions each device, toggles their relay, then returns to factory reset state
 
                  Note that it is inadvisable to run multiple copies of this program while new devices are being
                  powered on to configure.  The program will automatically detect any new device and might attempt
@@ -677,7 +695,34 @@ def help_replace( more = None ):
 
                      python automagic.py replace --from-device 7FB210446B27 --to-device 537B3C3F8823
                      python automagic.py apply --restore-device 537B3C3F8823
+                """))
           
+def help_acceptance_test( more = None ):
+    print(dedent(""" 
+                 acceptance-test
+                 ---------------
+                 The "acceptance-test" operation checks that devices can be contacted in AP mode (factory reset) and toggles 
+                 their relay, without provisioning them. 
+
+                     python automagic.py acceptance-test
+                """))
+
+def help_config_test( more = None ):
+    print(dedent(""" 
+                 config-test
+                 -----------
+                 Provisions each device, toggles their relay, and then returns them factory settings.
+
+                     python automagic.py config-test
+                """))
+
+def help_list_versions( more = None ):
+    print(dedent(""" 
+                 list-versions
+                 -------------
+                 Lists prior versions of firmware available for a given device.
+
+                     python automagic.py list-versions -a 192.168.1.122
                 """))
 
 def example_provision_1():
@@ -1096,6 +1141,34 @@ def example_replace_1():
                  $ python automagic.py replace --from-device 7FB210446B27 --to-device 537B3C3F8823
                  $ python automagic.py apply --restore-device 537B3C3F8823
           """ )
+
+def example_list_versions_1( ):
+    print(dedent(""" 
+             Example list-versions
+             ---------------------
+             The list-versions operation shows the prior versions of firmware available for a given device.
+
+                 $ python automagic.py list-versions -a 192.168.1.122
+                """))
+
+def example_acceptance_test( ):
+    print(dedent(""" 
+             acceptance-test
+             ---------------
+             The "acceptance-test" operation checks that devices can be contacted in AP mode (factory reset) and toggles 
+             their relay, without provisioning them. 
+
+                 $ python automagic.py acceptance-test
+                """))
+
+def example_config_test( ):
+    print(dedent(""" 
+             config-test
+             -----------
+             Provisions each device, toggles their relay, and then returns them factory settings.
+
+                 $ python automagic.py config-test
+                """))
 
 def help_example( more = None ):
     if not more:
@@ -1685,7 +1758,7 @@ def get_url( addr, tm, verbose, url, operation, tmout = 2 ):
         contents=""
         raw_data=""
         if verbose and operation != '':
-            print( 'Attempting to connect to device at ' + addr + ' ' + operation )
+            print( 'Attempting to connect to ' + addr + ' ' + operation )
             if verbose > 1:
                 print( url )
         try:
@@ -2106,7 +2179,7 @@ def flash_device( addr, pause_time, verbose, ota, ota_timeout, new_version, dry_
     print( "status: " + result['status'] + ", version: " + result['old_version'] )
     if not new_version and ota == 'LATEST':
         settings = get_url( addr, pause_time, verbose, get_settings_url( addr ), 'to get current device type' )
-        if not result:
+        if not settings:
             print( "Could not get settings for device " + addr )
             return False
         dev_type = settings[ 'device' ][ 'type' ]
@@ -2434,8 +2507,9 @@ def query( args, new_version = None ):
 
 def probe_list( args ):
     query_conditions = [ x.split('=') for x in args.query_conditions.split(',') ] if args.query_conditions else []
+
     if args.refresh:
-        dq = [ device_db[ k ] for k in device_db.keys() if 'ProbeIP' in device_db[ k ][ 'ConfigInput' ] ]
+        dq = [ device_db[ k ] for k in device_db.keys() if k != 'Format' and 'ProbeIP' in device_db[ k ][ 'ConfigInput' ] ]
     else:
         dq = device_queue
 
@@ -2484,6 +2558,18 @@ def probe_list( args ):
 
     if need_write:
         write_json_file( args.device_db, device_db )
+
+def acceptance_test( args, credentials ):
+    while True:
+        found = wifi_connect( None, args.prefix, prefix=True, ignore_ssids=[], verbose=args.verbose )
+        if found:
+            print( "Found " + found )
+            print( "Unplug device to try another" )
+            toggle_device( "192.168.33.1", None )
+            print( "Searching for another device" )
+        else:
+            print( "Failed to find device to test. Pausing for 5s to try again" )
+            time.sleep( 5 )
 
 def provision_native( credentials, args, new_version ):
     global device_queue, device_db
@@ -2781,6 +2867,26 @@ def clear_list( queue_file ):
 def identify( device_address ):
     toggle_device( device_address, None )
 
+def myfunc( e ): 
+    return repr( e[ 'version' ].split('.') )
+
+def list_versions( addr, pause_time, verbose ):
+    settings = get_url( addr, pause_time, verbose, get_settings_url( addr ), 'to get current device type' )
+    if not settings:
+        print( "Could not get settings for device " + addr )
+        return
+    dev_type = settings[ 'device' ][ 'type' ]
+
+    versions = get_url( 'archive.shelly-tools.de' , pause_time, verbose, 'http://archive.shelly-tools.de/archive.php?type=' + dev_type, 'to get firmware list' )
+    hwidth = 0
+    for v in versions:
+        if len( v[ 'version' ] ) > hwidth: hwidth = len( v[ 'version' ] )
+
+    versions.sort( key=lambda e : [ int( re.sub( r'[^0-9]', '', k ) ) for k in e[ 'version' ].split('.') ] )
+
+    for v in versions:
+        print( v[ 'version' ].ljust( hwidth ) + "    " + ( "http://" + addr + "/ota?url=" if verbose else "" ) + "http://archive.shelly-tools.de/version/" + v[ 'version' ] + "/" + v[ 'file' ] )
+
 def replace_device( db_path, from_device, to_device ):
     global device_db
 
@@ -2842,6 +2948,8 @@ def validate_options( p, vars ):
               "probe-list" : [ "query_conditions", "group", "refresh", "access" ],
               "provision-list" : [ "group", "ddwrt_name", "group", "cue", "timing", "ota", "print_using", "toggle", "wait_time", "settings" ],
               "provision" : [ "ssid", "wait_time", "ota", "print_using", "toggle", "cue", "settings" ],
+              "acceptance-test" : [ "ssid" ],
+              "config-test" : [ "ssid" ],
               "list" : [ "group" ],
               "clear-list" : [ ]
             }
@@ -2850,6 +2958,7 @@ def validate_options( p, vars ):
     require = { "factory-reset" : [ "device_address" ],
                 "identify" : [ "device_address" ],
                 "flash" : [ "device_address", "ota" ],
+                "list-versions" : [ "device_address" ],
                 "ddwrt-learn" : [ "ddwrt_name", "ddwrt_address", "ddwrt_password" ],
                 "import" : [ "file" ],
                 "replace" : [ "from_device", "to_device" ],
@@ -2932,10 +3041,7 @@ def main():
     p.add_argument(       '--to-device', metavar='DEVICE-ID', help='Device db entry to receive the copy of settings using the replace operation' )
     p.add_argument(       '--dry-run', action='store_true', help='Display urls to apply instead of performing --restore or --settings' )
     p.add_argument(       '--settings', help='Comma separated list of name=value settings for use with provision operation' )
-    p.add_argument( metavar='OPERATION',
-                    help='|'.join(all_operations),
-                    dest="operation", 
-                    choices=all_operations )
+    p.add_argument(       metavar='OPERATION', help='|'.join(all_operations), dest="operation", choices=all_operations )
 
     p.add_argument( dest='what', default=None, nargs='*' )
 
@@ -3052,7 +3158,17 @@ def main():
         else:
             import_csv( args.file, args.device_queue )
 
-    elif args.operation == 'provision' or args.operation == 'provision-list' and not args.ddwrt_name:
+    elif args.operation == 'acceptance-test':
+        init( )
+        credentials = get_cred( )
+        try:
+            acceptance_test( args, credentials )
+        finally:
+            print( "Reconnecting to " + credentials['ssid'] )
+            wifi_reconnect( credentials )
+
+    elif args.operation in ( 'provision', 'config-test' ) or args.operation == 'provision-list' and not args.ddwrt_name:
+        if args.operation == 'config-test': args.wait_time = 99999999
         init( )
         credentials = get_cred( )
         try:
@@ -3099,6 +3215,9 @@ def main():
 
     elif args.operation == 'identify':
         identify( args.device_address )
+
+    elif args.operation == 'list-versions':
+        list_versions( args.device_address, args.pause_time, args.verbose )
 
     elif args.operation == 'schema':
         schema( args )
