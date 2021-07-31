@@ -1901,7 +1901,7 @@ def toggle_device( ip_address, dev_type ):
         else:
             fail_cnt += 1
         time.sleep( 0.5 )
-        if success_cnt > 0 and fail_cnt > 1 or fail_cnt > 5: break
+        if success_cnt > 0 and fail_cnt > 1 or fail_cnt > 10: break
 
     if success_cnt == 0:
         print( "Unsuccessful attempt to toggle device." )
@@ -2572,7 +2572,8 @@ def acceptance_test( args, credentials ):
         if found:
             prior_ssids[ found ] = 1
             print( "Found " + found )
-            print( "Now attempting to toggle relay." )
+            print( "In 5s will attempt to toggle relay." )
+            time.sleep( 5 )
             print( "When you hear it click, you can unplug the device to try another" )
             toggle_device( "192.168.33.1", None )
             print( )
