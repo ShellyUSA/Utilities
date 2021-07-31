@@ -116,10 +116,14 @@ import collections
 import copy
 import socket
 
+try:
+    import requests
+except:
+    pass
+
 if sys.version_info.major >= 3:
     import urllib.request
     import urllib.parse
-    import requests
     from io import BytesIO
     import collections.abc
     from urllib.parse import urlencode, quote_plus, quote
