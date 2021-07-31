@@ -1756,7 +1756,7 @@ def url_encode( vals ):
 
 def any_timeout_reason( e ):
     return isinstance( e, socket.timeout ) or \
-           'reason' in e and ( isinstance( e.reason, socket.timeout ) or \
+           'reason' in dir( e ) and ( isinstance( e.reason, socket.timeout ) or \
                 str( e.reason ) in (
                     '[Errno 64] Host is down',
                     '[Errno 61] Connection refused',
