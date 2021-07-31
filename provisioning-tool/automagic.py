@@ -1875,27 +1875,26 @@ def get_toggle_url( ip, dev_type ):
     ### return "http://" + ip + "/" + dev_type + "/0?turn=on&timer=1"
     return "http://" + ip + "/" + dev_type + "/0?turn=toggle"
 
-def toggle_device( ip_address, dev_type ):
+def toggle_device( ip_address, dev_type, verbosity = 0 ):
     success_cnt = 0
     fail_cnt = 0
     use_type = None
     while True:
-        result1 = '' 
-        result2 = ''
+        result = '' 
         # TODO: use dev_type to determine relay/light. For now, try both.
-        if not use_type or use_type == 'light':
-            try:
-                result2 = url_read( get_toggle_url( ip_address, 'light' ) )
-            except:
-                result2 = ""
-            if not use_type and result2 != '': use_type = 'light'
-        if not use_type or use_type == 'relay':
-            try:
-                result1 = url_read( get_toggle_url( ip_address, 'relay' ) )
-            except:
-                result1 = ""
-            if not use_type and result1 != '': use_type = 'relay'
-        if result1 != '' or result2 != '':
+        for try_type in ( 'light', 'relay' ):
+            if not use_type or use_type == try_type:
+                try:
+                    result = url_read( get_toggle_url( ip_address, try_type ) )
+                    use_type = try_type
+                except BaseException as e:
+                    if verbosity > 1:
+                        eprint( "Error in toggle_device:", sys.exc_info( )[0] )
+                    else:
+                        if not any_timeout_reason( e ):
+                            eprint( "Error in toggle_device:", sys.exc_info( )[0] )
+                    result = ""
+        if result != '':
             success_cnt += 1
             fail_cnt = 0
         else:
@@ -2575,7 +2574,7 @@ def acceptance_test( args, credentials ):
             print( "In 5s will attempt to toggle relay." )
             time.sleep( 5 )
             print( "When you hear it click, you can unplug the device to try another" )
-            toggle_device( "192.168.33.1", None )
+            toggle_device( "192.168.33.1", None, args.verbose )
             print( )
             print( "Searching for another device" )
         else:
