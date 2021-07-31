@@ -58,15 +58,11 @@
 #
 #  TODO:
 #
+#            Remove depenency on requests module for 3.8/dd-wrt functionality (?)
 #
 #   #### D/W and H/T just not reporting sensor updates?????
 #
 #            per-device OTA flash versions ... instead of LATEST, OTAVersion|ApplyOTA|... (or something)
-#            
-#                  display choices of old fw versions from the archive page
-#                        http://archive.shelly-tools.de/archive.php           --> yields types
-#                        http://archive.shelly-tools.de/archive.php?type=SH2LED-1           --> yields versions
-#                        http://192.168.1.1/ota?url=http://archive.shelly-tools.de/version/v1.1.10/SH2LED-1.zip
 #            
 #            To document: Allow omission of password in import (or a placeholder like "tbd") so it can work with single SSID/pw mode
 #            of list-provision, where no DD-WRT device is specified.
@@ -78,14 +74,13 @@
 #            OTA from local webserver
 #            --ota-version-check=required|skip|try (in case redirect/forwarding would fail)
 #
-#            new operation apply-list(?)  to apply --settings or --url to probe-list devices, instead of db
+#            new operation apply-list(?)  to apply --settings or --url to probe-list devices, instead of known devices in db
 #            Simplify some python2/3 compatibility per: http://python-future.org/compatible_idioms.html
 #            DeviceType -- limit provision-list to matching records -- provision-list to choose devices by DeviceType
-#            -U option to apply operation to make arbitray updates in device DB (for use prior to restore)
+#            -U option to apply operation to make arbitrary updates in device DB (for use prior to restore)
 #            --parallel=<n>  batched parallel firmware updating, n at a time, pausing between batches, or exiting if no more
 #            --group for "provision" -- add to group
 #            --prompt n,n,n  for use with "provision" to prompt for v,v,v giving individual values like StaticIP
-#            Access=Continuous/Periodic -- to indicate which devices shouldn't be expected online
 #
 #  FUTURE:
 #            my.shelly.cloud API integration?
@@ -3186,7 +3181,7 @@ def main():
             wifi_reconnect( credentials )
 
     elif args.operation in ( 'provision', 'config-test' ) or args.operation == 'provision-list' and not args.ddwrt_name:
-        if args.operation == 'config-test': args.wait_time = 99999999
+        if args.operation == 'config-test': args.wait_time = 999999
         init( )
         credentials = get_cred( )
         try:
