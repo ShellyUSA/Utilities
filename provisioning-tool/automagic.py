@@ -1894,7 +1894,7 @@ def toggle_device( ip_address, dev_type, verbosity = 0 ):
                 except BaseException as e:
                     if verbosity > 1:
                         eprint( "Error in toggle_device:", sys.exc_info( )[0] )
-                    else:
+                    elif verbosity > 0:
                         if not any_timeout_reason( e ):
                             eprint( "Error in toggle_device:", sys.exc_info( )[0] )
                     result = ""
@@ -2575,8 +2575,8 @@ def acceptance_test( args, credentials ):
         if found:
             prior_ssids[ found ] = 1
             print( "Found " + found )
-            print( "In 5s will attempt to toggle relay." )
-            time.sleep( 5 )
+            print( "Will attempt to toggle relay." )
+            time.sleep( 1 )
             print( "When you hear it click, you can unplug the device to try another" )
             toggle_device( "192.168.33.1", None, args.verbose )
             print( )
