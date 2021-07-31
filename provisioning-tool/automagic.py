@@ -1328,6 +1328,7 @@ def pc_write_profile( ssid, path ):
                         <name>""" + ssid + """</name>
 		</SSID>
 	</SSIDConfig>
+	<connectionType>ESS</connectionType>
 	<connectionMode>manual</connectionMode>
 	<MSM>
 		<security>
