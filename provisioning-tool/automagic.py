@@ -1386,19 +1386,19 @@ def pc_wifi_connect( credentials, mstr, prefix = False, password = '', ignore_ss
         if not network:
             if skipped and verbose:
                 print( "skipped " + str( skipped ) + " device(s) still showing up on network but previously processed" )
-            os.system('cmd /c "netsh wlan connect name=' + pc_quote( credentials['profile'] ) + ' "')
+            subprocess.check_output('cmd /c "netsh wlan connect name=' + pc_quote( credentials['profile'] ) + ' "')
             return None
     else:
         network = mstr
 
     pc_write_profile( network, tempfile.gettempdir() + r"\ntwrk_tmp.xml" )
-    os.system('cmd /c "netsh wlan add profile filename=' + tempfile.gettempdir() + r'\ntwrk_tmp.xml user=all"')
+    subprocess.check_output('cmd /c "netsh wlan add profile filename=' + tempfile.gettempdir() + r'\ntwrk_tmp.xml user=all"')
 
-    os.system('cmd /c "netsh wlan connect name=' + pc_quote( network ) + ' "')
+    subprocess.check_output('cmd /c "netsh wlan connect name=' + pc_quote( network ) + ' "')
     return network
 
 def pc_wifi_reconnect( credentials ):
-    os.system('cmd /c "netsh wlan connect name=' + pc_quote( credentials['profile'] ) + ' "')
+    subprocess.check_output('cmd /c "netsh wlan connect name=' + pc_quote( credentials['profile'] ) + ' "')
     return True
 
 ####################################################################################
