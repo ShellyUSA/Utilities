@@ -1366,7 +1366,7 @@ def pc_wifi_connect( credentials, mstr, prefix = False, password = '', ignore_ss
     if prefix:
         print( "Disconnecting from your WiFi to try to discover new SSIDs, because of Windows OS limitations. :-(" )
         # it's necessary to disconnect in order to have wlan show networks show all networks
-        os.system('cmd /c "netsh wlan disconnect"')
+        subprocess.check_output('cmd /c "netsh wlan disconnect"')
         time.sleep( 5 )    # this sleep may have helped in finding devices which would be missed if show networks runs too soon
         show_networks = subprocess.check_output( 'cmd /c "netsh wlan show networks"' ).decode('utf8')
         network = None
@@ -1419,7 +1419,7 @@ def mac_get_cred():
     ssid = os_stash['iface'].ssid()
     print( "You will be prompted for your password in order to get WiFi credentials from the current " + ssid + " network.  Press <escape> to abort." )
     time.sleep( .5 )
-    pw = subprocess.check_output( """security find-generic-password -ga """ + ssid + """ 2>&1 1>/dev/null | sed -e 's/password: "//' -e 's/"$//'""", shell=True ).rstrip().decode("ascii")
+    pw = subprocess.check_output( """security find-generic-password -ga '""" + ssid + """' 2>&1 1>/dev/null | sed -e 's/password: "//' -e 's/"$//'""", shell=True ).rstrip().decode("ascii")
     if pw == '':
         print( "Could not get wifi password" )
         sys.exit()
