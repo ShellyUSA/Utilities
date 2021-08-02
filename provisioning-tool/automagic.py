@@ -1345,8 +1345,11 @@ def pc_write_profile( ssid, path ):
 </WLANProfile>""")
     f.close()
 
+def pc_quote( s ):
+    return '^"' + s.replace("^","^^").replace("&","^&") + '^"'
+
 def pc_get_cmd_output(cmd, key, err):
-    output = subprocess.check_output( cmd, shell=True ).decode( 'utf8' )
+    output = subprocess.check_output( cmd ).decode( 'utf8' )
     m = re.search( key + ' *:  *(.*)', output )
     if not m:
          eprint( err )
@@ -1356,7 +1359,7 @@ def pc_get_cmd_output(cmd, key, err):
 def pc_get_cred():
     ssid = pc_get_cmd_output( 'cmd /c "netsh wlan show interfaces | findstr SSID"', 'SSID', "Could not identify current SSID" )
     profile = pc_get_cmd_output( 'cmd /c "netsh wlan show interfaces | findstr Profile"', 'Profile', "Could not identify current Profile" )
-    pw = pc_get_cmd_output( 'cmd /c "netsh wlan show profile name=' + ssid + ' key=clear | findstr Key"', 'Key Content', "Could not determine pasword for network " + ssid )
+    pw = pc_get_cmd_output( 'cmd /c "netsh wlan show profile name=' + pc_quote( ssid ) + ' key=clear | findstr Key"', 'Key Content', "Could not determine pasword for network " + ssid )
     return { 'profile' : ssid, 'ssid' : ssid, 'password' : pw }
 
 def pc_wifi_connect( credentials, mstr, prefix = False, password = '', ignore_ssids = {}, verbose = 0 ):
@@ -1365,7 +1368,7 @@ def pc_wifi_connect( credentials, mstr, prefix = False, password = '', ignore_ss
         # it's necessary to disconnect in order to have wlan show networks show all networks
         os.system('cmd /c "netsh wlan disconnect"')
         time.sleep( 5 )    # this sleep may have helped in finding devices which would be missed if show networks runs too soon
-        show_networks = subprocess.check_output( 'cmd /c "netsh wlan show networks"', shell=True ).decode('utf8')
+        show_networks = subprocess.check_output( 'cmd /c "netsh wlan show networks"' ).decode('utf8')
         network = None
         networks = re.findall( r'SSID .*', show_networks, re.MULTILINE )
         if verbose > 1: print(repr(networks))
@@ -1383,7 +1386,7 @@ def pc_wifi_connect( credentials, mstr, prefix = False, password = '', ignore_ss
         if not network:
             if skipped and verbose:
                 print( "skipped " + str( skipped ) + " device(s) still showing up on network but previously processed" )
-            os.system('cmd /c "netsh wlan connect name=' + credentials['profile'] + '"')
+            os.system('cmd /c "netsh wlan connect name=' + pc_quote( credentials['profile'] ) + ' "')
             return None
     else:
         network = mstr
@@ -1391,11 +1394,11 @@ def pc_wifi_connect( credentials, mstr, prefix = False, password = '', ignore_ss
     pc_write_profile( network, tempfile.gettempdir() + r"\ntwrk_tmp.xml" )
     os.system('cmd /c "netsh wlan add profile filename=' + tempfile.gettempdir() + r'\ntwrk_tmp.xml user=all"')
 
-    os.system('cmd /c "netsh wlan connect name=' + network + '"')
+    os.system('cmd /c "netsh wlan connect name=' + pc_quote( network ) + ' "')
     return network
 
 def pc_wifi_reconnect( credentials ):
-    os.system('cmd /c "netsh wlan connect name=' + credentials['profile'] + '"')
+    os.system('cmd /c "netsh wlan connect name=' + pc_quote( credentials['profile'] ) + ' "')
     return True
 
 ####################################################################################
