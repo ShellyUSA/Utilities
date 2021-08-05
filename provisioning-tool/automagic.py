@@ -24,6 +24,8 @@
 #
 #  Changes:
 #
+# 1.0009     DD-WRT works with spaces and "&" in SSID
+#
 # 1.0008     Completed config-test feature
 #
 # 1.0007     Attributes now stored under ConfigInput and ConfigStatus JSON objects instead of top-level.
@@ -58,9 +60,13 @@
 #
 #  TODO:
 #
-#            Remove depenency on requests module for 3.8/dd-wrt functionality (?)
+#            Test other special characters beyond "&": *,+'"`!#%() etc.  Test w/DD-WRT, Windows, Mac
 #
-#   #### D/W and H/T just not reporting sensor updates?????
+#            Cache OTA build info
+#            Remove depenency on requests module for python3.8/dd-wrt functionality (?)
+#
+#            Enforce SSID/password limitations
+#                Max SSID len = 31 characters
 #
 #            per-device OTA flash versions ... instead of LATEST, OTAVersion|ApplyOTA|... (or something)
 #            
@@ -131,7 +137,7 @@ else:
     from StringIO import StringIO
     from urllib2 import HTTPError
 
-version = "1.0007"
+version = "1.0009"
 
 required_keys = [ 'SSID', 'Password' ]
 optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName', 'LatLng', 'TZ', 'Access' ]
@@ -1530,7 +1536,7 @@ def ddwrt_apply( address, user, password ):
 
 def ddwrt_program_mode( cn, pgm, from_db, deletes=None ):
     for k in pgm.keys():
-        ddwrt_get_single_line_result( cn, "nvram set " + k + '=' + pgm[k] )
+        ddwrt_get_single_line_result( cn, "nvram set " + k + '="' + pgm[k] + '"' )
     mode = pgm[ 'wl_mode' ]
     for k in from_db:
         ddwrt_get_single_line_result( cn, "nvram set " + k + '=' + cn[ 'router' ][ mode ][ k ] )
@@ -2100,8 +2106,8 @@ def read_device_queue( dq, args, ssid ):
             if 'ConfigInput' not in rec:
                 continue
             cfg = rec[ 'ConfigInput' ]
-            if 'ConfigStatus' in rec and 'CompletedTime' in rec['ConfigStatus'] in rec or args.group and \
-                ( not 'Group' in cfg or cfg[ 'Group' ] != args.group ) or \
+            if 'ConfigStatus' in rec and 'CompletedTime' in rec['ConfigStatus'] or \
+                args.group and ( not 'Group' in cfg or cfg[ 'Group' ] != args.group ) or \
                 ssid and ssid != cfg[ 'SSID' ]:
                 continue
             if 'ConfigStatus' not in rec: rec[ 'ConfigStatus' ] = {}
