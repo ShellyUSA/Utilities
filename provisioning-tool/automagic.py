@@ -24,6 +24,8 @@
 #
 #  Changes:
 #
+# 1.0010     Now caches OTA build info
+#            
 # 1.0009     DD-WRT works with spaces and "&" in SSID
 #
 # 1.0008     Completed config-test feature
@@ -60,9 +62,11 @@
 #
 #  TODO:
 #
+#            Actions for motion sensor to support interval:
+#                  192.168.56.2/settings/actions?index=0&enabled=true&name=motion_on&urls[0][url]=http%3A%2F%2Fwhat.com&urls[0][int]=0000-0000
+#
 #            Test other special characters beyond "&": *,+'"`!#%() etc.  Test w/DD-WRT, Windows, Mac
 #
-#            Cache OTA build info
 #            Remove depenency on requests module for python3.8/dd-wrt functionality (?)
 #
 #            Enforce SSID/password limitations
@@ -137,7 +141,7 @@ else:
     from StringIO import StringIO
     from urllib2 import HTTPError
 
-version = "1.0009"
+version = "1.0010"
 
 required_keys = [ 'SSID', 'Password' ]
 optional_keys = [ 'StaticIP', 'NetMask', 'Gateway', 'Group', 'Label', 'ProbeIP', 'Tags', 'DeviceName', 'LatLng', 'TZ', 'Access' ]
@@ -382,7 +386,7 @@ def help_provision_list( more = None ):
 
                      --prefix STRING             Prefix for SSID search. Defaults to "shelly".
 
-                     --verbose (-v)              Give verbose logging output (repeating -v increases verbosity).
+                     --verbose (-v)              Give verbose logging output (repeating -v increases verbosity, use -vvv or more for debug).
 
                      --ota PATH                  Apply OTA update of firmware after provisioning. PATH should specify an http path to
                                                  the firmware, or "LATEST".
@@ -1145,6 +1149,11 @@ def example_replace_1():
              the apply operation.
 
 
+                 $ python automagic.py import -f my-probe-list.csv               # import IP addresses to probe
+                 $ python automagic.py probe-list                                # learn devices
+                 $ python automagic.py provision                                 # discover new device
+                 $ python automatic.py list                                      # look up IDs of devices
+
                  $ python automagic.py replace --from-device 7FB210446B27 --to-device 537B3C3F8823
                  $ python automagic.py apply --restore-device 537B3C3F8823
           """ )
@@ -1186,6 +1195,10 @@ def help_example( more = None ):
     else:
         try:
             eval( 'example_' + more.replace('-','_') + '(  )' )
+        except:
+            pass
+        try:
+            eval( 'example_' + more.replace('-','_') + '_1(  )' )
         except:
             print( "There is no example titled " + more )
             print( )
@@ -1377,10 +1390,10 @@ def pc_wifi_connect( credentials, mstr, prefix = False, password = '', ignore_ss
         show_networks = subprocess.check_output( 'cmd /c "netsh wlan show networks"' ).decode('utf8')
         network = None
         networks = re.findall( r'SSID .*', show_networks, re.MULTILINE )
-        if verbose > 1: print(repr(networks))
+        if verbose > 2: print(repr(networks))
         skipped = 0
         for n in networks:
-            if verbose > 1: print(repr(n))
+            if verbose > 2: print(repr(n))
             m = re.search( 'SSID  *[0-9][0-9]*  *:  *(' + mstr + '.*)', n )
             if m and m.group(1) != '':
                 if m.group(1).rstrip() not in ignore_ssids:
@@ -1390,7 +1403,7 @@ def pc_wifi_connect( credentials, mstr, prefix = False, password = '', ignore_ss
                     skipped += 1
 
         if not network:
-            if skipped and verbose:
+            if skipped and verbose > 2:
                 print( "skipped " + str( skipped ) + " device(s) still showing up on network but previously processed" )
             subprocess.check_output('cmd /c "netsh wlan connect name=' + pc_quote( credentials['profile'] ) + ' "')
             return None
@@ -1444,7 +1457,7 @@ def mac_wifi_connect( credentials, str, prefix = False, password = '', ignore_ss
                 break
             time.sleep( 1 )
     
-        if verbose > 1: print(repr(networks))
+        if verbose > 2: print(repr(networks))
     
         if not networks:
             eprint( error )
@@ -1463,7 +1476,7 @@ def mac_wifi_connect( credentials, str, prefix = False, password = '', ignore_ss
         return None
    
     if found: 
-        if verbose > 1: print( 'Detected ' + found.ssid() )
+        if verbose > 2: print( 'Detected ' + found.ssid() )
         success, error = os_stash['iface'].associateToNetwork_password_error_(found, password, None)
         if error:
              eprint(error)
@@ -1661,7 +1674,7 @@ def ddwrt_wget( cn, url, verbose, msg, tries = 1 ):
     passes = 0
     if msg:
         sys.stdout.write( msg )
-    if verbose > 0:
+    if verbose > 2:
         print( url )
     while True:
         passes += 1
@@ -1785,9 +1798,9 @@ def get_url( addr, tm, verbose, url, operation, tmout = 2 ):
     for i in range( 10 ):
         contents=""
         raw_data=""
-        if verbose and operation != '':
+        if verbose > 2 and operation != '':
             print( 'Attempting to connect to ' + addr + ' ' + operation )
-            if verbose > 1:
+            if verbose > 3:
                 print( url )
         try:
             raw_data = url_read( url, tmout = tmout )
@@ -1799,10 +1812,10 @@ def get_url( addr, tm, verbose, url, operation, tmout = 2 ):
             if any_timeout_reason( e ):
                pass   ### ignore timeout
             else:
-               if verbose or i > 3: print( 'error in get_url: ' + repr( str( e ) ) )
+               if verbose > 2 or i > 3: print( 'error in get_url: ' + repr( str( e ) ) )
        
         if contents:
-            if verbose > 1:
+            if verbose > 3:
                 print( repr( contents ) )
             return contents
         time.sleep( tm )
@@ -1902,15 +1915,15 @@ def toggle_device( ip_address, dev_type, verbosity = 0 ):
         for try_type in ( 'light', 'relay' ):
             if not use_type or use_type == try_type:
                 url = get_toggle_url( ip_address, try_type )
-                if verbosity:
+                if verbosity > 2:
                     print( "Toggle url: '" + url + "'" )
                 try:
                     result = url_read( url )
                     if result: use_type = try_type
                 except BaseException as e:
-                    if verbosity > 1:
+                    if verbosity > 3:
                         eprint( "Error in toggle_device:", sys.exc_info( )[0] )
-                    elif verbosity > 0:
+                    elif verbosity > 2:
                         if not any_timeout_reason( e ):
                             eprint( "Error in toggle_device:", sys.exc_info( )[0] )
                     result = ""
@@ -2016,7 +2029,7 @@ def complete_probe( args, rec, initial_status = None ):
     if not initial_status:
         initial_status = get_url( ip_address, args.pause_time, args.verbose, status_url( ip_address ), 'to get current status' )
     if initial_status:
-        if args.verbose > 1:
+        if args.verbose > 3:
             print( ip_address )
         configured_settings = get_url( ip_address, args.pause_time, args.verbose, get_settings_url( ip_address ), 'to get config' )
         actions = get_actions( ip_address, 1, args.verbose )
@@ -2687,7 +2700,7 @@ def provision_native( credentials, args, new_version ):
                             req = set_settings_url( factory_device_addr, ssid, pw, None, None, None )
 
                         content = json.loads( url_read( req ) )
-                        if args.verbose > 1:
+                        if args.verbose > 2:
                             print( repr( content ) )
                         got_one = True
                     except:
@@ -2846,7 +2859,7 @@ def provision_ddwrt( args, new_version ):
                 rec[ 'ConfigStatus' ][ 'CompletedTime' ] = time.time()
                 write_json_file( args.device_queue, device_queue )
 
-                if args.verbose > 1: print( repr( configured_settings ) )
+                if args.verbose > 2: print( repr( configured_settings ) )
                 print( )
 
                 new_status = get_status( ip_address, args.pause_time, args.verbose )
@@ -2952,12 +2965,19 @@ def list_versions( addr, pause_time, verbose ):
 
     versions.sort( key=lambda e : [ int( re.sub( r'[^0-9]', '', k ) ) for k in e[ 'version' ].split('.') ] )
 
+    if verbose > 1:
+        firmware_db = read_json_file( 'shelly-fw-versions.json', {}, True )
+        firmware_db[ 'Format' ] = 'automagic'
     for v in versions:
         url = "http://archive.shelly-tools.de/version/" + v[ 'version' ] + "/" + v[ 'file' ]
         print( v[ 'version' ].ljust( hwidth ) + "    " + ( "http://" + addr + "/ota?url=" if verbose else "" ) + url )
-        if verbose > 5:
-            new_version = get_firmware_version( url )
-            print( "    " + new_version )
+        if verbose > 1:
+            if url not in firmware_db:
+                new_version = get_firmware_version( url )
+                firmware_db[ url ] = new_version
+            print( "    " + firmware_db[ url ] )
+    if verbose > 1:
+        write_json_file( 'shelly-fw-versions.json', firmware_db )
 
 def replace_device( db_path, from_device, to_device ):
     global device_db
@@ -2989,7 +3009,7 @@ def replace_device( db_path, from_device, to_device ):
 def factory_reset( device_address, verbose ):
     try:
         contents = json.loads( url_read( "http://" + device_address + "/settings/?reset=1" ) )
-        if verbose > 1:
+        if verbose > 2:
             print( repr( contents ) )
         print( "Reset sent to " + device_address )
     except BaseException as e:
@@ -3193,7 +3213,7 @@ def main():
         device_queue = read_json_file( args.device_queue, [], ['SSID','ProbeIP'] )
 
     if args.ota and args.ota != 'LATEST':
-        if args.verbose > 0: print( "Checking version of OTA firmware" )
+        if args.verbose > 2: print( "Checking version of OTA firmware" )
         new_version = get_firmware_version( args.ota )
         if new_version:
             print( "OTA firmware build ID: " + new_version )
